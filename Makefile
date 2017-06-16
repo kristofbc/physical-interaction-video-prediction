@@ -1,4 +1,4 @@
-.PHONY: clean data lint requirements sync_data_to_s3 sync_data_from_s3
+.PHONY: clean data lint requirements sync_data_to_s3 sync_data_from_s3 train
 
 #################################################################################
 # GLOBALS                                                                       #
@@ -64,6 +64,10 @@ test_environment:
 # PROJECT RULES                                                                 #
 #################################################################################
 
+## Run the training process: make ARGS="--batch_size=32 ..." train
+#train: test_environment
+train: 
+	python src/models/train_model.py ${ARGS}
 
 
 #################################################################################
