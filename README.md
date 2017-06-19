@@ -1,7 +1,14 @@
-unsupervised_learning_physical_interaction_video_prediction
+Unsupervised Learning for Physical Interaction through Video Prediction
 ==============================
 
 Based on the paper from C. Finn, I. Goodfellow and S. Levine: "Unsupervised Learning for Physical Interaction through Video Prediction". Implemented in Chainer.
+
+Running the training process
+------------
+```bash
+$ make train
+$ ARGS="--max_batchsize=64" make train # with arguments
+```
 
 Project Organization
 ------------
@@ -53,4 +60,4 @@ Project Organization
 
 --------
 
-<p><small>Project based on the <a target="_blank" href="https://drivendata.github.io/cookiecutter-data-science/">cookiecutter data science project template</a>. #cookiecutterdatascience</small></p>
+
