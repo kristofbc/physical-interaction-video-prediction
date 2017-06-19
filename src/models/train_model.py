@@ -110,11 +110,36 @@ def conv_2d(inputs, W=None, stride=1, pad=1):
     return convolution_2d.convolution_2d(inputs, None, W, stride, pad)
 
 def layer_normalization_conv_2d(inputs):
+    """
+        Apply a "layer normalization" on the result of a convolution
+
+        Args:
+            inputs: input tensor, 4D, batch x channel x height x width
+        Returns:
+            Output variable of shape (batch x channels x height x width)
+    """
     batch_size, channels, height, width = inputs.shape[0:4]
     inputs = F.reshape(inputs, (batch_size, -1))
     inputs = L.LayerNormalization()(inputs)
     inputs = F.reshape(inputs, (batch_size, channels, height, width))
     return inputs
+
+def broadcasted_division(x, y, axis=0):
+    """
+        Apply a division x/y where y is broadcasted to x to be able to complete the operation
+        
+        Args:
+            x: the numerator
+            y: the denominator
+            axis: where the reshape will be performed
+        Results:
+            Output variable of same shape of x
+    """
+    y_shape = tuple([1] * axis + list(y.shape) +
+                [1] * (len(x.shape) - axis - len(y.shape)))
+    y_t = F.reshape(y, y_shape)
+    y_t = F.broadcast_to(y_t, x.shape)
+    return x / y_t
 
 # =============
 # Models (mdls)
@@ -244,7 +269,6 @@ class StatelessCDNA(chainer.Chain):
 
             enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)(prev_image)
             # TensorFlow code use layer_normalization for normalize on the output convolution
-            # @TODO: Chainer does not do that, we need our own implementation
             enc0 = layer_normalization_conv_2d(enc0)
             
             hidden1, lstm_state1 = self.stateless_lstm(inputs=enc0, state=lstm_state1, num_channels=32)
@@ -311,10 +335,8 @@ class StatelessCDNA(chainer.Chain):
             norm_factor_broadcasted = F.broadcast_to(norm_factor, cdna_kerns.shape)
             cdna_kerns = cdna_kerns / norm_factor_broadcasted
 
-            #cdna_kerns = np.tile(cdna_kerns, (1,1,1, color_channels, 1))
             cdna_kerns = F.tile(cdna_kerns, (1,3,1,1,1))
             cdna_kerns = F.split_axis(cdna_kerns, indices_or_sections=batch_size, axis=0)
-            #prev_images = np.split(ary=prev_image, indices_or_sections=batch_size, axis=0)
             prev_images = F.split_axis(prev_image, indices_or_sections=batch_size, axis=0)
 
             # Transform image
@@ -323,7 +345,6 @@ class StatelessCDNA(chainer.Chain):
                 kernel = F.squeeze(kernel)
                 if len(kernel.shape) == 3:
                     kernel = kernel[..., np.keepdims]
-                #conv = F.depthwise_convolution_2d(preimg, kernel, [1,1,1,1])
                 conv = L.DepthwiseConvolution2D(in_channels=preimg.shape[1], channel_multiplier=kernel.shape[3], ksize=(kernel.shape[1], kernel.shape[2]), stride=1, pad=kernel.shape[1]/2)(preimg)
                 tmp_transformed.append(conv)
             tmp_transformed = F.concat(tmp_transformed, axis=0)
@@ -332,7 +353,6 @@ class StatelessCDNA(chainer.Chain):
 
             # Masks
             masks = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=num_masks+1, ksize=(1,1), stride=1)(enc6)
-            #masks = np.reshape(F.softmax(np.reshape(masks, (-1, num_masks + 1))), (int(batch_size), num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1
             masks = F.reshape(masks, (-1, num_masks + 1))
             masks = F.softmax(masks)
             masks = F.reshape(masks, (int(batch_size), num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1? ok!
@@ -345,6 +365,169 @@ class StatelessCDNA(chainer.Chain):
             current_state = L.Linear(in_size=None, out_size=current_state.shape[1])(state_action)
             gen_states.append(current_state)
             logger.info("StatelessCDNA sub-iteration done")
+
+        return gen_images, gen_states
+
+
+class StatelessDNA(chainer.Chain):
+    """
+        Build convolutional lstm video predictor using DNA
+        * Because the DNA does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
+    """
+    
+    def __init__(self):
+        super(StatelessDNA, self).__init__(
+            stateless_lstm = BasicConvLSTMCell()
+        )
+
+    def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
+        """
+            Learn through StatelessDNA. Because it's stateless, we need to feed the state of the previous iteration if one do not one to start anew
+            Args:
+                images: tensor of ground truth image sequences
+                actions: tensor of action sequences
+                states: tensor of ground truth state sequences
+                iter_num: tensor of the current training iteration (for sched. sampling)
+                k: constant used for scheduled sampling. -1 to feed in own prediction.
+                use_state: True to include state and action in prediction
+                num_masks: the number of different pixel motion predictions (and
+                           the number of masks for each of those predictions)
+                feeding in own predictions
+                num_frame_before_prediction: number of ground truth frames to pass in before
+                                             feeding in own predictions
+            Returns:
+                gen_images: predicted future image frames
+                gen_states: predicted future states
+        """
+        logger = logging.getLogger(__name__)
+        batch_size, color_channels, img_height, img_width = images[0].shape[0:4]
+        
+        # Generated robot states and images
+        gen_states, gen_images = [], []
+        current_state = states[0]
+
+        if scheduled_sampling_k == -1:
+            feedself = True
+        else:
+            # Scheduled sampling, inverse sigmoid decay
+            # Calculate number of ground-truth frames to pass in.
+            num_ground_truth = math.exp(iter_num / scheduled_sampling_k)
+            num_ground_truth = scheduled_sampling_k + num_ground_truth
+            num_ground_truth = scheduled_sampling_k / num_ground_truth
+            num_ground_truth = int(round(float(batch_size) * num_ground_truth))
+            feedself = False
+
+        lstm_state1, lstm_state2, lstm_state3, lstm_state4 = None, None, None, None
+        lstm_state5, lstm_state6, lstm_state7 = None, None, None
+
+        for image, action in zip(images[:-1], actions[:-1]):
+            # Reuse variables after the first timestep
+            reuse = bool(gen_images)
+
+            done_warm_start = len(gen_images) > num_frame_before_prediction - 1
+            if feedself and done_warm_start:
+                # Feed in generated image
+                prev_image = gen_images[-1]
+                logger.info("Feed in generated image")
+            elif done_warm_start:
+                # Scheduled sampling
+                prev_image = scheduled_sample(image, gen_images[-1], batch_size, num_ground_truth)
+                logger.info("Feed in scheduled_sample")
+            else:
+                # Always feed in ground_truth
+                prev_image = variable.Variable(image)
+                logger.info("Feed in normal image")
+
+            # Predicted state is always fed back in
+            state_action = F.concat((action, current_state), axis=1)
+
+            enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)(prev_image)
+            # TensorFlow code use layer_normalization for normalize on the output convolution
+            enc0 = layer_normalization_conv_2d(enc0)
+            
+            hidden1, lstm_state1 = self.stateless_lstm(inputs=enc0, state=lstm_state1, num_channels=32)
+            hidden1 = layer_normalization_conv_2d(hidden1)
+            hidden2, lstm_state2 = self.stateless_lstm(inputs=hidden1, state=lstm_state2, num_channels=32)
+            hidden2 = layer_normalization_conv_2d(hidden2)
+            enc1 = L.Convolution2D(in_channels=hidden2.shape[1], out_channels=hidden2.shape[2], ksize=(3,3), stride=2, pad=3/2)(hidden2)
+
+            hidden3, lstm_state3 = self.stateless_lstm(inputs=enc1, state=lstm_state3, num_channels=64)
+            hidden3 = layer_normalization_conv_2d(hidden3)
+            hidden4, lstm_state4 = self.stateless_lstm(inputs=hidden3, state=lstm_state4, num_channels=64)
+            hidden4 = layer_normalization_conv_2d(hidden4)
+            enc2 = L.Convolution2D(in_channels=hidden4.shape[1], out_channels=hidden4.shape[1], ksize=(3,3), stride=2, pad=3/2)(hidden4)
+
+            # Pass in state and action
+            smear = F.reshape(state_action, (int(batch_size), int(state_action.shape[1]), 1, 1))
+            smear = F.tile(smear, (1, 1, int(enc2.shape[2]), int(enc2.shape[3])))
+
+            if use_state:
+                enc2 = F.concat((enc2, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
+            enc3 = L.Convolution2D(in_channels=enc2.shape[1], out_channels=hidden4.shape[1], ksize=(1,1), stride=1, pad=1/2)(enc2)
+ 
+            hidden5, lstm_state5 = self.stateless_lstm(inputs=enc3, state=lstm_state5, num_channels=128)
+            hidden5 = layer_normalization_conv_2d(hidden5)
+            # ** Had to add outsize + pad!
+            enc4 = L.Deconvolution2D(in_channels=hidden5.shape[1], out_channels=hidden5.shape[1], ksize=(3,3), stride=2, outsize=(hidden5.shape[2]*2, hidden5.shape[3]*2), pad=3/2)(hidden5)
+
+            hidden6, lstm_state6 = self.stateless_lstm(inputs=enc4, state=lstm_state6, num_channels=64)
+            hidden6 = layer_normalization_conv_2d(hidden6)
+            # Skip connection
+            hidden6 = F.concat((hidden6, enc1), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
+
+            # ** Had to add outsize + pad!
+            enc5 = L.Deconvolution2D(in_channels=hidden6.shape[1], out_channels=hidden6.shape[1], ksize=(3,3), stride=2, outsize=(hidden6.shape[2]*2, hidden6.shape[3]*2), pad=3/2)(hidden6)
+            hidden7, lstm_state7 = self.stateless_lstm(inputs=enc5, state=lstm_state7, num_channels=32)
+            hidden7 = layer_normalization_conv_2d(hidden7)
+            # Skip connection
+            hidden7 = F.concat((hidden7, enc0), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
+
+            # ** Had to add outsize + pad!
+            enc6 = L.Deconvolution2D(in_channels=hidden7.shape[1], out_channels=hidden7.shape[1], ksize=(3,3), stride=2, outsize=(hidden7.shape[2]*2, hidden7.shape[3]*2), pad=3/2)(hidden7)
+            enc6 = layer_normalization_conv_2d(enc6)
+
+            # DNA specific
+            enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=5**2, ksize=(1,1), stride=1)(enc6)
+            if num_masks != 1:
+                raise ValueError('Only one mask is supported for DNA model.')
+
+            # Construct translated images
+            prev_image_pad = F.pad(prev_image, pad_width=[[0,0], [0,0], [2,2], [2,2]], mode='constant', constant_values=0)
+            kernel_inputs = []
+            for xkern in range(5):
+                for ykern in range(5):
+                    #tmp = F.get_item(prev_image_pad, [prev_image_pad.shape[0], prev_image_pad.shape[0], xkern:img_height, ykern:img_width])
+                    tmp = F.get_item(prev_image_pad, list([slice(0,prev_image_pad.shape[0]), slice(0,prev_image_pad.shape[1]), slice(xkern,img_height), slice(ykern,img_width)]))
+                    # ** Added this operation to make sure the size was still the original one!
+                    tmp = F.pad(tmp, [[0,0], [0,0], [0, xkern], [0, ykern]], mode='constant', constant_values=0)
+                    tmp = F.expand_dims(tmp, axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
+                    kernel_inputs.append(tmp.data)
+            kernel_inputs = F.concat(kernel_inputs, axis=1) # Previously axis=3 but our channel us on axis=1 ? ok!
+
+            # Normalize channels to 1
+            kernel_normalized = F.relu(enc7 - 1e-12) + 1e+12
+            kernel_normalized_sum = F.sum(kernel_normalized, axis=1, keepdims=True) # Previously axis=3 but our channel are on axis 1 ? ok!
+            kernel_normalized = broadcasted_division(kernel_normalized, kernel_normalized_sum)
+            kernel_normalized = F.expand_dims(kernel_normalized, axis=2)
+            kernel_normalized = F.scale(kernel_inputs, kernel_normalized, axis=0)
+            kernel_normalized = F.sum(kernel_normalized, axis=1, keepdims=False)
+            transformed = [kernel_normalized]
+
+            # Masks
+            masks = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=num_masks+1, ksize=(1,1), stride=1)(enc6)
+            masks = F.reshape(masks, (-1, num_masks + 1))
+            masks = F.softmax(masks)
+            masks = F.reshape(masks, (int(batch_size), num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1? ok!
+            mask_list = F.split_axis(masks, indices_or_sections=num_masks+1, axis=1) # Previously axis=3 but our channels are on axis=1 ? ok!
+            output = F.scale(prev_image, mask_list[0], axis=0)
+            for layer, mask in zip(transformed, mask_list[1:]):
+                output += F.scale(layer, mask, axis=0)
+            gen_images.append(output)
+
+            current_state = L.Linear(in_size=None, out_size=current_state.shape[1])(state_action)
+            gen_states.append(current_state)
+
+            logger.info("StatelessDNA sub-iteration done")
 
         return gen_images, gen_states
 
@@ -375,9 +558,9 @@ class Model(chainer.Chain):
         if is_cdna:
             model = StatelessCDNA()
         elif is_stp:
-            print('STP')
+            model = StatelessSTP()
         elif is_dna:
-            print('DNA')
+            model = StatelessDNA()
         if model is None:
             raise ValueError("No network specified")
         else:
@@ -424,6 +607,161 @@ class Model(chainer.Chain):
         summaries.append(self.prefix + '_loss: ' + str(loss.data))
         
         return self.loss, self.psnr_all, summaries
+
+
+class StatelessSTP(chainer.Chain):
+    """
+        Build convolutional lstm video predictor using STP
+        * Because the STP does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
+    """
+    
+    def __init__(self):
+        super(StatelessSTP, self).__init__(
+            stateless_lstm = BasicConvLSTMCell()
+        )
+
+    def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
+        """
+            Learn through StatelessSTP. Because it's stateless, we need to feed the state of the previous iteration if one do not one to start anew
+            Args:
+                images: tensor of ground truth image sequences
+                actions: tensor of action sequences
+                states: tensor of ground truth state sequences
+                iter_num: tensor of the current training iteration (for sched. sampling)
+                k: constant used for scheduled sampling. -1 to feed in own prediction.
+                use_state: True to include state and action in prediction
+                num_masks: the number of different pixel motion predictions (and
+                           the number of masks for each of those predictions)
+                feeding in own predictions
+                num_frame_before_prediction: number of ground truth frames to pass in before
+                                             feeding in own predictions
+            Returns:
+                gen_images: predicted future image frames
+                gen_states: predicted future states
+        """
+        logger = logging.getLogger(__name__)
+        batch_size, color_channels, img_height, img_width = images[0].shape[0:4]
+        
+        # Generated robot states and images
+        gen_states, gen_images = [], []
+        current_state = states[0]
+
+        if scheduled_sampling_k == -1:
+            feedself = True
+        else:
+            # Scheduled sampling, inverse sigmoid decay
+            # Calculate number of ground-truth frames to pass in.
+            num_ground_truth = math.exp(iter_num / scheduled_sampling_k)
+            num_ground_truth = scheduled_sampling_k + num_ground_truth
+            num_ground_truth = scheduled_sampling_k / num_ground_truth
+            num_ground_truth = int(round(float(batch_size) * num_ground_truth))
+            feedself = False
+
+        lstm_state1, lstm_state2, lstm_state3, lstm_state4 = None, None, None, None
+        lstm_state5, lstm_state6, lstm_state7 = None, None, None
+
+        for image, action in zip(images[:-1], actions[:-1]):
+            # Reuse variables after the first timestep
+            reuse = bool(gen_images)
+
+            done_warm_start = len(gen_images) > num_frame_before_prediction - 1
+            if feedself and done_warm_start:
+                # Feed in generated image
+                prev_image = gen_images[-1]
+                logger.info("Feed in generated image")
+            elif done_warm_start:
+                # Scheduled sampling
+                prev_image = scheduled_sample(image, gen_images[-1], batch_size, num_ground_truth)
+                logger.info("Feed in scheduled_sample")
+            else:
+                # Always feed in ground_truth
+                prev_image = variable.Variable(image)
+                logger.info("Feed in normal image")
+
+            # Predicted state is always fed back in
+            state_action = F.concat((action, current_state), axis=1)
+
+            enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)(prev_image)
+            # TensorFlow code use layer_normalization for normalize on the output convolution
+            enc0 = layer_normalization_conv_2d(enc0)
+            
+            hidden1, lstm_state1 = self.stateless_lstm(inputs=enc0, state=lstm_state1, num_channels=32)
+            hidden1 = layer_normalization_conv_2d(hidden1)
+            hidden2, lstm_state2 = self.stateless_lstm(inputs=hidden1, state=lstm_state2, num_channels=32)
+            hidden2 = layer_normalization_conv_2d(hidden2)
+            enc1 = L.Convolution2D(in_channels=hidden2.shape[1], out_channels=hidden2.shape[2], ksize=(3,3), stride=2, pad=3/2)(hidden2)
+
+            hidden3, lstm_state3 = self.stateless_lstm(inputs=enc1, state=lstm_state3, num_channels=64)
+            hidden3 = layer_normalization_conv_2d(hidden3)
+            hidden4, lstm_state4 = self.stateless_lstm(inputs=hidden3, state=lstm_state4, num_channels=64)
+            hidden4 = layer_normalization_conv_2d(hidden4)
+            enc2 = L.Convolution2D(in_channels=hidden4.shape[1], out_channels=hidden4.shape[1], ksize=(3,3), stride=2, pad=3/2)(hidden4)
+
+            # Pass in state and action
+            smear = F.reshape(state_action, (int(batch_size), int(state_action.shape[1]), 1, 1))
+            smear = F.tile(smear, (1, 1, int(enc2.shape[2]), int(enc2.shape[3])))
+
+            if use_state:
+                enc2 = F.concat((enc2, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
+            enc3 = L.Convolution2D(in_channels=enc2.shape[1], out_channels=hidden4.shape[1], ksize=(1,1), stride=1, pad=1/2)(enc2)
+ 
+            hidden5, lstm_state5 = self.stateless_lstm(inputs=enc3, state=lstm_state5, num_channels=128)
+            hidden5 = layer_normalization_conv_2d(hidden5)
+            # ** Had to add outsize + pad!
+            enc4 = L.Deconvolution2D(in_channels=hidden5.shape[1], out_channels=hidden5.shape[1], ksize=(3,3), stride=2, outsize=(hidden5.shape[2]*2, hidden5.shape[3]*2), pad=3/2)(hidden5)
+
+            hidden6, lstm_state6 = self.stateless_lstm(inputs=enc4, state=lstm_state6, num_channels=64)
+            hidden6 = layer_normalization_conv_2d(hidden6)
+            # Skip connection
+            hidden6 = F.concat((hidden6, enc1), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
+
+            # ** Had to add outsize + pad!
+            enc5 = L.Deconvolution2D(in_channels=hidden6.shape[1], out_channels=hidden6.shape[1], ksize=(3,3), stride=2, outsize=(hidden6.shape[2]*2, hidden6.shape[3]*2), pad=3/2)(hidden6)
+            hidden7, lstm_state7 = self.stateless_lstm(inputs=enc5, state=lstm_state7, num_channels=32)
+            hidden7 = layer_normalization_conv_2d(hidden7)
+            # Skip connection
+            hidden7 = F.concat((hidden7, enc0), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
+
+            # ** Had to add outsize + pad!
+            enc6 = L.Deconvolution2D(in_channels=hidden7.shape[1], out_channels=hidden7.shape[1], ksize=(3,3), stride=2, outsize=(hidden7.shape[2]*2, hidden7.shape[3]*2), pad=3/2)(hidden7)
+            enc6 = layer_normalization_conv_2d(enc6)
+
+            # STP specific
+            enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=3, ksize=(1,1), stride=1)(enc6)
+            transformed = list([F.sigmoid(enc7)])
+
+            stp_input0 = F.reshape(hidden5, (int(batch_size), -1))
+            stp_input1 = L.Linear(in_size=None, out_size=100)(stp_input0)
+            identity_params = np.array([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
+            identity_params = np.repeat(identity_params, int(batch_size), axis=0)
+            identity_params = variable.Variable(identity_params)
+
+            stp_transformations = []
+            for i in range(num_masks-1):
+                params = L.Linear(in_size=None, out_size=6)(stp_input1) + identity_params
+                params = F.reshape(params, (int(params.shape[0]), 2, 3))
+                grid = F.spatial_transformer_grid(params, (prev_image.shape[2], prev_image.shape[3]))
+                trans = F.spatial_transformer_sampler(prev_image, grid)
+                stp_transformations.append(trans)
+
+            transformed += stp_transformations
+
+            # Masks
+            masks = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=num_masks+1, ksize=(1,1), stride=1)(enc6)
+            masks = F.reshape(masks, (-1, num_masks + 1))
+            masks = F.softmax(masks)
+            masks = F.reshape(masks, (int(batch_size), num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1? ok!
+            mask_list = F.split_axis(masks, indices_or_sections=num_masks+1, axis=1) # Previously axis=3 but our channels are on axis=1 ?
+            output = F.scale(prev_image, mask_list[0], axis=0)
+            for layer, mask in zip(transformed, mask_list[1:]):
+                output += F.scale(layer, mask, axis=0)
+            gen_images.append(output)
+
+            current_state = L.Linear(in_size=None, out_size=current_state.shape[1])(state_action)
+            gen_states.append(current_state)
+            logger.info("StatelessCDNA sub-iteration done")
+
+        return gen_images, gen_states
 
 
 # =================================================
@@ -563,7 +901,6 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
         optimizer.update()
 
         logger.info("{0} {1}".format(str(itr+1), str(loss.data)))
-        
         loss_valid, psnr_all_valid, summaries_valid = None, None, []
         if itr % validation_interval == 2:
             if len(validation_queue) == 0:
