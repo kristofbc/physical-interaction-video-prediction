@@ -15,11 +15,13 @@ import chainer.functions as F
 import chainer.links as L
 from chainer.functions.connection import convolution_2d
 from chainer import initializers
+from chainer import serializers
 from chainer.functions.math import square
 from chainer.functions.math import sum
 
 import sys
 import os
+import time
 import glob
 import csv
 import click
@@ -531,84 +533,6 @@ class StatelessDNA(chainer.Chain):
 
         return gen_images, gen_states
 
-class Model(chainer.Chain):
-    """
-        This Model wrap other models like CDNA, STP or DNA.
-        It calls their training and get the generated images and states, it then compute the losses and other various parameters
-    """
-    
-    def __init__(self, is_cdna=True, is_dna=False, is_stp=False, prefix=None):
-        """
-            Initialize a CDNA, STP or DNA through this 'wrapper' Model
-            Args:
-                is_cdna: if the model should be an extension of CDNA
-                is_dna: if the model should be an extension of DNA
-                is_stp: if the model should be an extension of STP
-                prefix: appended to the results to differentiate between training and validation
-                learning_rate: learning rate
-        """
-        super(Model, self).__init__()
-        self.prefix = prefix
-
-        self.psnr_all = 0
-        self.loss = 0
-        self.train_op = 0
-
-        model = None
-        if is_cdna:
-            model = StatelessCDNA()
-        elif is_stp:
-            model = StatelessSTP()
-        elif is_dna:
-            model = StatelessDNA()
-        if model is None:
-            raise ValueError("No network specified")
-        else:
-            self.add_link('model', model)
-
-    def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
-        """
-            Calls the training process
-            Args:
-                images: an array of Tensor of shape batch x channels x height x width
-                actions: an array of Tensor of shape batch x action
-                states: an array of Tensor of shape batch x state
-                iter_num: iteration (epoch) index
-                scheduled_sampling_k: the hyperparameter k for sheduled sampling
-                use_state: if the model should use action+state
-                num_masks: number of masks
-                num_frame_before_prediction: number of frame before prediction
-            Returns:
-                loss, all the peak signal to noise ratio, summaries
-        """
-        gen_images, gen_states = self.model(images, actions, states, iter_num, scheduled_sampling_k, use_state, num_masks, num_frame_before_prediction)
-
-        # L2 loss, PSNR for eval
-        loss, psnr_all = 0.0, 0.0
-        summaries = []
-        for i, x, gx in zip(range(len(gen_images)), images[num_frame_before_prediction:], gen_images[num_frame_before_prediction - 1:]):
-            x = variable.Variable(x)
-            recon_cost = mean_squared_error(x, gx)
-            psnr_i = peak_signal_to_noise_ratio(x, gx)
-            psnr_all += psnr_i
-            summaries.append(self.prefix + '_recon_cost' + str(i) + ': ' + str(recon_cost.data))
-            summaries.append(self.prefix + '_psnr' + str(i) + ': ' + str(psnr_i.data))
-            loss += recon_cost
-
-        for i, state, gen_state in zip(range(len(gen_states)), states[num_frame_before_prediction:], gen_states[num_frame_before_prediction - 1:]):
-            state = variable.Variable(state)
-            state_cost = mean_squared_error(state, gen_state) * 1e-4
-            summaries.append(self.prefix + '_state_cost' + str(i) + ': ' + str(state_cost.data))
-            loss += state_cost
-        
-        summaries.append(self.prefix + '_psnr_all: ' + str(psnr_all.data))
-        self.psnr_all = psnr_all
-        self.loss = loss = loss / np.float32(len(images) - num_frame_before_prediction)
-        summaries.append(self.prefix + '_loss: ' + str(loss.data))
-        
-        return self.loss, self.psnr_all, summaries
-
-
 class StatelessSTP(chainer.Chain):
     """
         Build convolutional lstm video predictor using STP
@@ -764,6 +688,84 @@ class StatelessSTP(chainer.Chain):
         return gen_images, gen_states
 
 
+class Model(chainer.Chain):
+    """
+        This Model wrap other models like CDNA, STP or DNA.
+        It calls their training and get the generated images and states, it then compute the losses and other various parameters
+    """
+    
+    def __init__(self, is_cdna=True, is_dna=False, is_stp=False, prefix=None):
+        """
+            Initialize a CDNA, STP or DNA through this 'wrapper' Model
+            Args:
+                is_cdna: if the model should be an extension of CDNA
+                is_dna: if the model should be an extension of DNA
+                is_stp: if the model should be an extension of STP
+                prefix: appended to the results to differentiate between training and validation
+                learning_rate: learning rate
+        """
+        super(Model, self).__init__()
+        self.prefix = prefix
+
+        self.psnr_all = 0
+        self.loss = 0
+        self.train_op = 0
+
+        model = None
+        if is_cdna:
+            model = StatelessCDNA()
+        elif is_stp:
+            model = StatelessSTP()
+        elif is_dna:
+            model = StatelessDNA()
+        if model is None:
+            raise ValueError("No network specified")
+        else:
+            self.add_link('model', model)
+
+    def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
+        """
+            Calls the training process
+            Args:
+                images: an array of Tensor of shape batch x channels x height x width
+                actions: an array of Tensor of shape batch x action
+                states: an array of Tensor of shape batch x state
+                iter_num: iteration (epoch) index
+                scheduled_sampling_k: the hyperparameter k for sheduled sampling
+                use_state: if the model should use action+state
+                num_masks: number of masks
+                num_frame_before_prediction: number of frame before prediction
+            Returns:
+                loss, all the peak signal to noise ratio, summaries
+        """
+        gen_images, gen_states = self.model(images, actions, states, iter_num, scheduled_sampling_k, use_state, num_masks, num_frame_before_prediction)
+
+        # L2 loss, PSNR for eval
+        loss, psnr_all = 0.0, 0.0
+        summaries = []
+        for i, x, gx in zip(range(len(gen_images)), images[num_frame_before_prediction:], gen_images[num_frame_before_prediction - 1:]):
+            x = variable.Variable(x)
+            recon_cost = mean_squared_error(x, gx)
+            psnr_i = peak_signal_to_noise_ratio(x, gx)
+            psnr_all += psnr_i
+            summaries.append(self.prefix + '_recon_cost' + str(i) + ': ' + str(recon_cost.data))
+            summaries.append(self.prefix + '_psnr' + str(i) + ': ' + str(psnr_i.data))
+            loss += recon_cost
+
+        for i, state, gen_state in zip(range(len(gen_states)), states[num_frame_before_prediction:], gen_states[num_frame_before_prediction - 1:]):
+            state = variable.Variable(state)
+            state_cost = mean_squared_error(state, gen_state) * 1e-4
+            summaries.append(self.prefix + '_state_cost' + str(i) + ': ' + str(state_cost.data))
+            loss += state_cost
+        
+        summaries.append(self.prefix + '_psnr_all: ' + str(psnr_all.data))
+        self.psnr_all = psnr_all
+        self.loss = loss = loss / np.float32(len(images) - num_frame_before_prediction)
+        summaries.append(self.prefix + '_loss: ' + str(loss.data))
+        
+        return self.loss, self.psnr_all, summaries
+
+
 # =================================================
 # Main entry point of the training processes (main)
 # =================================================
@@ -796,6 +798,10 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
     logger.info('GPU: {}'.format(gpu))
     logger.info('# Minibatch-size: {}'.format(batch_size))
     logger.info('# epoch: {}'.format(epoch))
+
+    model_suffix_dir = "{0}-{1}-{2}".format(time.strftime("%Y%m%d-%H%M%S"), model_type, batch_size)
+    training_suffix = "{0}".format('training')
+    validation_suffix = "{0}".format('validation')
 
     logger.info("Fetching the models and inputs")
     data_map = []
@@ -863,6 +869,11 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
     # Run training
     # As per Finn's implementation, one epoch is run on one batch size, randomly, but never more than once.
     # At the end of the queue, if the epochs len is not reach, the queue is generated again. 
+    global_losses = []
+    global_psnr_all = []
+    global_losses_valid = []
+    global_psnr_all_valid = []
+
     training_queue = []
     validation_queue = []
     fill_length_training = batch_size - (len(images_training) % batch_size)
@@ -900,9 +911,12 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
         loss, psnr_all, summaries = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
         optimizer.update()
 
+        global_losses.append(loss.data)
+        global_psnr_all.append(psnr_all.data)
+
         logger.info("{0} {1}".format(str(itr+1), str(loss.data)))
         loss_valid, psnr_all_valid, summaries_valid = None, None, []
-        if itr % validation_interval == 2:
+        if itr+1 % validation_interval == 0:
             if len(validation_queue) == 0:
                 # Create random partition for the batches
                 # If the length of the validation is < fill_length_validation, make sure to pad it
@@ -942,9 +956,22 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
             # Run through validation set
             loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
 
-        if itr % save_interval == 2:
+            global_losses_valid.append(loss_valid.data)
+            global_psnr_all_valid.append(psnr_all_valid.data)
+
+        if itr % save_interval == 0:
             logger.info('Saving model')
             # @TODO: Save the model
+            save_dir = output_dir + '/' + model_suffix_dir
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+
+            serializers.save_npz(save_dir + '/' + training_suffix + '-' + str(itr), training_model)
+            serializers.save_npz(save_dir + '/' + validation_suffix + '-' + str(itr), validation_model)
+            np.save(save_dir + '/' + training_suffix + '-global_losses', np.array(global_losses))
+            np.save(save_dir + '/' + training_suffix + '-global_psnr_all', np.array(global_psnr_all))
+            np.save(save_dir + '/' + training_suffix + '-global_losses_valid', np.array(global_losses_valid))
+            np.save(save_dir + '/' + training_suffix + '-global_psnr_all', np.array(global_psnr_all_valid))
 
         for summ in summaries:
             logger.info(summ)
