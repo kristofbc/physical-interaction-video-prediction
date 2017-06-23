@@ -7,7 +7,7 @@ Running the training process
 ------------
 ```bash
 $ make train
-$ ARGS="--max_batchsize=64" make train # with arguments
+$ make ARGS="--max_batchsize=64" train # with arguments
 ```
 
 Project Organization

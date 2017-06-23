@@ -35,7 +35,7 @@ def main(data_dir, out_dir, sequence_length, image_original_width, image_origina
             logger.error("No files found with extensions .tfrecords in directory {0}".format(out_dir))
             exit()
 
-        queue = tf.train.string_input_producer(files)
+        queue = tf.train.string_input_producer(files, shuffle=False)
         reader = tf.TFRecordReader()
         _, serialized_example = reader.read(queue)
         image_seq, state_seq, action_seq = [], [], []

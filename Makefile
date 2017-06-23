@@ -1,4 +1,4 @@
-.PHONY: clean data lint requirements sync_data_to_s3 sync_data_from_s3 train
+.PHONY: clean data lint requirements sync_data_to_s3 sync_data_from_s3 train visualization
 
 #################################################################################
 # GLOBALS                                                                       #
@@ -68,6 +68,10 @@ test_environment:
 #train: test_environment
 train: 
 	python src/models/train_model.py ${ARGS}
+
+## Create the visualization from the model: make visualization model_name
+visualization:
+	python src/visualization/visualize.py $(MODEL)
 
 
 #################################################################################
