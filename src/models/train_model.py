@@ -17,7 +17,6 @@ from chainer.functions.connection import convolution_2d
 from chainer import initializers
 from chainer import serializers
 from chainer.functions.math import square
-from chainer.functions.math import sum
 
 import sys
 import os
@@ -182,7 +181,7 @@ class BasicConvLSTMCell(chainer.Chain):
 
         h, c = F.split_axis(state, indices_or_sections=2, axis=1)
         #inputs_h = np.concatenate((inputs, h), axis=1)
-        inputs_h = F.concat((inputs, h))
+        inputs_h = F.concat((inputs, h), axis=1)
 
         # Parameters of gates are concatenated into one conv for efficiency
         i_j_f_o = L.Convolution2D(in_channels=inputs_h.shape[1], out_channels=4*num_channels, ksize=(filter_size, filter_size), pad=filter_size/2)(inputs_h)
@@ -195,7 +194,7 @@ class BasicConvLSTMCell(chainer.Chain):
         new_h = F.tanh(new_c) * F.sigmoid(o)
 
         #return new_h, np.concatenate((new_c, new_h), axis=1)
-        return new_h, F.concat((new_c, new_h))
+        return new_h, F.concat((new_c, new_h), axis=1)
 
 class StatelessCDNA(chainer.Chain):
     """
@@ -204,35 +203,232 @@ class StatelessCDNA(chainer.Chain):
     """
     
     def __init__(self):
-        super(StatelessCDNA, self).__init__(
+        super(StatelessCDNA, self).__init__()
+
+    def __call__(self, lstm_states, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
+        """
+            Learn through StatelessCDNA.
+            Args:
+                lstm_states: An array of computed LSTM transformation
+                encs: An array of computed transformation
+                hiddens: An array of hidden layers
+                batch_size: Size of mini batches
+                prev_image: The image to transform
+                num_masks: Number of masks to apply
+                color_channels: Output color channels
+            Returns:
+                transformed: A list of masks to apply on the previous image
+        """
+        logger = logging.getLogger(__name__)
+        
+        lstm_state1, lstm_state2, lstm_state3, lstm_state4, lstm_state5, lstm_state6, lstm_state7 = lstm_states
+        enc0, enc1, enc2, enc3, enc4, enc5, enc6 = encs
+        hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
+
+        # CDNA specific
+        enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=3, ksize=(1,1), stride=1)(enc6)
+        enc7 = F.relu(enc7)
+        transformed = list([F.sigmoid(enc7)])
+
+        # CDNA specific
+        # Predict kernels using linear function of last layer
+        cdna_input = F.reshape(hidden5, (int(batch_size), -1))
+        cdna_kerns = L.Linear(in_size=None, out_size=5*5*num_masks)(cdna_input)
+        
+        # Reshape and normalize
+        #cdna_kerns = F.reshape(cdna_kerns, (batch_size, 1, 5, 5, num_masks))
+        cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), num_masks, 1, 5, 5))
+        cdna_kerns = F.relu(cdna_kerns - 1e-12) + 1e-12
+        norm_factor = F.sum(cdna_kerns, (2, 3, 4), keepdims=True)
+
+        # The norm factor is broadcasted to match the shape difference
+        axis_reshape = 0
+        norm_factor_new_shape = tuple([1] * axis_reshape + list(norm_factor.shape) +
+                                       [1] * (len(cdna_kerns.shape) - axis_reshape - len(norm_factor.shape)))
+        norm_factor = F.reshape(norm_factor, norm_factor_new_shape)
+        norm_factor_broadcasted = F.broadcast_to(norm_factor, cdna_kerns.shape)
+        cdna_kerns = cdna_kerns / norm_factor_broadcasted
+
+        cdna_kerns = F.tile(cdna_kerns, (1,1,3,1,1))
+        cdna_kerns = F.split_axis(cdna_kerns, indices_or_sections=batch_size, axis=0)
+        prev_images = F.split_axis(prev_image, indices_or_sections=batch_size, axis=0)
+
+        # Transform image
+        tmp_transformed = []
+        for kernel, preimg in zip(cdna_kerns, prev_images):
+            kernel = F.squeeze(kernel)
+            if len(kernel.shape) == 3:
+                kernel = kernel[..., np.keepdims]
+            conv = F.depthwise_convolution_2d(preimg, kernel, stride=(1, 1), pad=kernel.shape[2]/2)
+            tmp_transformed.append(conv)
+        tmp_transformed = F.concat(tmp_transformed, axis=0)
+        tmp_transformed = F.split_axis(tmp_transformed, indices_or_sections=num_masks, axis=1) # Previously axis=3 but our channels are on axis=1 ? ok!
+        transformed = transformed + list(tmp_transformed)
+
+        return transformed
+
+
+class StatelessDNA(chainer.Chain):
+    """
+        Build convolutional lstm video predictor using DNA
+        * Because the DNA does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
+    """
+    
+    def __init__(self):
+        super(StatelessDNA, self).__init__()
+
+    def __call__(self, lstm_states, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
+        """
+            Learn through StatelessDNA.
+            Args:
+                lstm_states: An array of computed LSTM transformation
+                encs: An array of computed transformation
+                hiddens: An array of hidden layers
+                batch_size: Size of mini batches
+                prev_image: The image to transform
+                num_masks: Number of masks to apply
+                color_channels: Output color channels
+            Returns:
+                transformed: A list of masks to apply on the previous image
+        """
+        logger = logging.getLogger(__name__)
+        
+        lstm_state1, lstm_state2, lstm_state3, lstm_state4, lstm_state5, lstm_state6, lstm_state7 = lstm_states
+        enc0, enc1, enc2, enc3, enc4, enc5, enc6 = encs
+        hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
+
+        # DNA specific
+        enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=5**2, ksize=(1,1), stride=1)(enc6)
+        if num_masks != 1:
+            raise ValueError('Only one mask is supported for DNA model.')
+
+        # Construct translated images
+        image_height = prev_image.shape[2]
+        image_width = prev_image.shape[3]
+        prev_image_pad = F.pad(prev_image, pad_width=[[0,0], [0,0], [2,2], [2,2]], mode='constant', constant_values=0)
+        kernel_inputs = []
+        for xkern in range(5):
+            for ykern in range(5):
+                #tmp = F.get_item(prev_image_pad, [prev_image_pad.shape[0], prev_image_pad.shape[0], xkern:img_height, ykern:img_width])
+                tmp = F.get_item(prev_image_pad, list([slice(0,prev_image_pad.shape[0]), slice(0,prev_image_pad.shape[1]), slice(xkern,img_height), slice(ykern,img_width)]))
+                # ** Added this operation to make sure the size was still the original one!
+                tmp = F.pad(tmp, [[0,0], [0,0], [0, xkern], [0, ykern]], mode='constant', constant_values=0)
+                tmp = F.expand_dims(tmp, axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
+                kernel_inputs.append(tmp.data)
+        kernel_inputs = F.concat(kernel_inputs, axis=1) # Previously axis=3 but our channel us on axis=1 ? ok!
+
+        # Normalize channels to 1
+        kernel_normalized = F.relu(enc7 - 1e-12) + 1e+12
+        kernel_normalized_sum = F.sum(kernel_normalized, axis=1, keepdims=True) # Previously axis=3 but our channel are on axis 1 ? ok!
+        kernel_normalized = broadcasted_division(kernel_normalized, kernel_normalized_sum)
+        kernel_normalized = F.expand_dims(kernel_normalized, axis=2)
+        kernel_normalized = F.scale(kernel_inputs, kernel_normalized, axis=0)
+        kernel_normalized = F.sum(kernel_normalized, axis=1, keepdims=False)
+        transformed = [kernel_normalized]
+
+        return transformed
+
+class StatelessSTP(chainer.Chain):
+    """
+        Build convolutional lstm video predictor using STP
+        * Because the STP does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
+    """
+    
+    def __init__(self):
+        super(StatelessSTP, self).__init__()
+
+    def __call__(self, lstm_states, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
+        """
+            Learn through StatelessSTP.
+            Args:
+                lstm_states: An array of computed LSTM transformation
+                encs: An array of computed transformation
+                hiddens: An array of hidden layers
+                batch_size: Size of mini batches
+                prev_image: The image to transform
+                num_masks: Number of masks to apply
+                color_channels: Output color channels
+            Returns:
+                transformed: A list of masks to apply on the previous image
+        """
+        logger = logging.getLogger(__name__)
+        
+        lstm_state1, lstm_state2, lstm_state3, lstm_state4, lstm_state5, lstm_state6, lstm_state7 = lstm_states
+        enc0, enc1, enc2, enc3, enc4, enc5, enc6 = encs
+        hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
+
+        # STP specific
+        enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=3, ksize=(1,1), stride=1)(enc6)
+        transformed = list([F.sigmoid(enc7)])
+
+        stp_input0 = F.reshape(hidden5, (int(batch_size), -1))
+        stp_input1 = L.Linear(in_size=None, out_size=100)(stp_input0)
+        identity_params = np.array([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
+        identity_params = np.repeat(identity_params, int(batch_size), axis=0)
+        identity_params = variable.Variable(identity_params)
+
+        stp_transformations = []
+        for i in range(num_masks-1):
+            params = L.Linear(in_size=None, out_size=6)(stp_input1) + identity_params
+            params = F.reshape(params, (int(params.shape[0]), 2, 3))
+            grid = F.spatial_transformer_grid(params, (prev_image.shape[2], prev_image.shape[3]))
+            trans = F.spatial_transformer_sampler(prev_image, grid)
+            stp_transformations.append(trans)
+
+        return stp_transformations
+
+
+class Model(chainer.Chain):
+    """
+        This Model wrap other models like CDNA, STP or DNA.
+        It calls their training and get the generated images and states, it then compute the losses and other various parameters
+    """
+    
+    def __init__(self, is_cdna=True, is_dna=False, is_stp=False, prefix=None):
+        """
+            Initialize a CDNA, STP or DNA through this 'wrapper' Model
+            Args:
+                is_cdna: if the model should be an extension of CDNA
+                is_dna: if the model should be an extension of DNA
+                is_stp: if the model should be an extension of STP
+                prefix: appended to the results to differentiate between training and validation
+                learning_rate: learning rate
+        """
+        super(Model, self).__init__(
             stateless_lstm = BasicConvLSTMCell()
         )
-        self.lstm_state1 = None
-        self.lstm_state2 = None
-        self.lstm_state3 = None
-        self.lstm_state4 = None
-        self.lstm_state5 = None
-        self.lstm_state6 = None
-        self.lstm_state7 = None
+        self.prefix = prefix
+
+        self.psnr_all = 0
+        self.loss = 0
+        self.train_op = 0
+
+        model = None
+        if is_cdna:
+            model = StatelessCDNA()
+        elif is_stp:
+            model = StatelessSTP()
+        elif is_dna:
+            model = StatelessDNA()
+        if model is None:
+            raise ValueError("No network specified")
+        else:
+            self.add_link('model', model)
 
     def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
         """
-            Learn through StatelessCDNA. Because it's stateless, we need to feed the state of the previous iteration if one do not one to start anew
+            Calls the training process
             Args:
-                images: tensor of ground truth image sequences
-                actions: tensor of action sequences
-                states: tensor of ground truth state sequences
-                iter_num: tensor of the current training iteration (for sched. sampling)
-                k: constant used for scheduled sampling. -1 to feed in own prediction.
-                use_state: True to include state and action in prediction
-                num_masks: the number of different pixel motion predictions (and
-                           the number of masks for each of those predictions)
-                feeding in own predictions
-                num_frame_before_prediction: number of ground truth frames to pass in before
-                                             feeding in own predictions
+                images: an array of Tensor of shape batch x channels x height x width
+                actions: an array of Tensor of shape batch x action
+                states: an array of Tensor of shape batch x state
+                iter_num: iteration (epoch) index
+                scheduled_sampling_k: the hyperparameter k for sheduled sampling
+                use_state: if the model should use action+state
+                num_masks: number of masks
+                num_frame_before_prediction: number of frame before prediction
             Returns:
-                gen_images: predicted future image frames
-                gen_states: predicted future states
+                loss, all the peak signal to noise ratio, summaries
         """
         logger = logging.getLogger(__name__)
         batch_size, color_channels, img_height, img_width = images[0].shape[0:4]
@@ -248,10 +444,9 @@ class StatelessCDNA(chainer.Chain):
         else:
             # Scheduled sampling, inverse sigmoid decay
             # Calculate number of ground-truth frames to pass in.
-            num_ground_truth = math.exp(iter_num / scheduled_sampling_k)
-            num_ground_truth = scheduled_sampling_k + num_ground_truth
-            num_ground_truth = scheduled_sampling_k / num_ground_truth
-            num_ground_truth = int(round(float(batch_size) * num_ground_truth))
+            num_ground_truth = np.int32(
+                np.round(np.float32(batch_size) * (scheduled_sampling_k / (scheduled_sampling_k + np.exp(iter_num / scheduled_sampling_k))))
+            )
             feedself = False
 
         lstm_state1, lstm_state2, lstm_state3, lstm_state4 = None, None, None, None
@@ -268,18 +463,14 @@ class StatelessCDNA(chainer.Chain):
             elif done_warm_start:
                 # Scheduled sampling
                 prev_image = scheduled_sample(image, gen_images[-1], batch_size, num_ground_truth)
+                prev_image = variable.Variable(prev_image)
             else:
                 # Always feed in ground_truth
                 prev_image = variable.Variable(image)
 
             # Predicted state is always fed back in
             state_action = F.concat((action, current_state), axis=1)
-            
-            #weights = np.load("data/external/weights_enc0.npy")
-            # (5,5,3,32) => (32, 3, 5, 5)
-            #weights = np.transpose(weights, (3, 2, 0, 1))
 
-            #enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2, initialW=weights)(prev_image)
             enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)(prev_image)
             enc0 = F.relu(enc0)
             # TensorFlow code use layer_normalization for normalize on the output convolution
@@ -332,50 +523,13 @@ class StatelessCDNA(chainer.Chain):
             enc6 = F.relu(enc6)
             enc6 = layer_normalization_conv_2d(enc6)
 
-            # CDNA specific
-            enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=3, ksize=(1,1), stride=1)(enc6)
-            enc7 = F.relu(enc7)
-            transformed = list([F.sigmoid(enc7)])
-
-            # CDNA specific
-            # Predict kernels using linear function of last layer
-            cdna_input = F.reshape(hidden5, (int(batch_size), -1))
-            cdna_kerns = L.Linear(in_size=None, out_size=5*5*num_masks)(cdna_input)
-            
-            # Reshape and normalize
-            #cdna_kerns = np.reshape(cdna_kerns, (batch_size, 5, 5, 1, num_masks))
-            cdna_kerns = F.reshape(cdna_kerns, (batch_size, 1, 5, 5, num_masks))
-            cdna_kerns = F.relu(cdna_kerns - 1e-12) + 1e-12
-            norm_factor = sum.sum(cdna_kerns, (1, 2, 3), keepdims=True)
-
-            # The norm factor is broadcasted to match the shape difference
-            axis_reshape = 0
-            norm_factor_new_shape = tuple([1] * axis_reshape + list(norm_factor.shape) +
-                                           [1] * (len(cdna_kerns.shape) - axis_reshape - len(norm_factor.shape)))
-            norm_factor = F.reshape(norm_factor, norm_factor_new_shape)
-            norm_factor_broadcasted = F.broadcast_to(norm_factor, cdna_kerns.shape)
-            cdna_kerns = cdna_kerns / norm_factor_broadcasted
-
-            cdna_kerns = F.tile(cdna_kerns, (1,3,1,1,1))
-            cdna_kerns = F.split_axis(cdna_kerns, indices_or_sections=batch_size, axis=0)
-            prev_images = F.split_axis(prev_image, indices_or_sections=batch_size, axis=0)
-
-            # Transform image
-            tmp_transformed = []
-            for kernel, preimg in zip(cdna_kerns, prev_images):
-                kernel = F.squeeze(kernel)
-                if len(kernel.shape) == 3:
-                    kernel = kernel[..., np.keepdims]
-                conv = L.DepthwiseConvolution2D(in_channels=preimg.shape[1], channel_multiplier=kernel.shape[3], ksize=(kernel.shape[1], kernel.shape[2]), stride=1, pad=kernel.shape[1]/2)(preimg)
-                tmp_transformed.append(conv)
-            tmp_transformed = F.concat(tmp_transformed, axis=0)
-            tmp_transformed = F.split_axis(tmp_transformed, indices_or_sections=num_masks, axis=1) # Previously axis=3 but our channels are on axis=1 ? ok!
-            transformed = transformed + list(tmp_transformed)
-
-            #cdna_output = np.load("data/external/cdna_output.npy")
-            #print(cdna_output[0][0][0][0], cdna_output[0][0][0][1], cdna_output[0][0][0][2])
-            #print(tmp_transformed[0].data[0][0][0][0], tmp_transformed[0].data[0][1][0][0], tmp_transformed[0].data[0][2][0][0])
-            #exit()
+            # Specific model transformations
+            transformed = self.model(
+                [lstm_state1, lstm_state2, lstm_state3, lstm_state4, lstm_state5, lstm_state6, lstm_state7],
+                [enc0, enc1, enc2, enc3, enc4, enc5, enc6],
+                [hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7],
+                batch_size, prev_image, num_masks, int(color_channels)
+            )
 
             # Masks
             masks = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=num_masks+1, ksize=(1,1), stride=1)(enc6)
@@ -390,380 +544,9 @@ class StatelessCDNA(chainer.Chain):
             gen_images.append(output)
 
             current_state = L.Linear(in_size=None, out_size=current_state.shape[1])(state_action)
-            current_state = F.relu(current_state)
             gen_states.append(current_state)
 
-        return gen_images, gen_states
-
-
-class StatelessDNA(chainer.Chain):
-    """
-        Build convolutional lstm video predictor using DNA
-        * Because the DNA does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
-    """
-    
-    def __init__(self):
-        super(StatelessDNA, self).__init__(
-            stateless_lstm = BasicConvLSTMCell()
-        )
-
-    def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
-        """
-            Learn through StatelessDNA. Because it's stateless, we need to feed the state of the previous iteration if one do not one to start anew
-            Args:
-                images: tensor of ground truth image sequences
-                actions: tensor of action sequences
-                states: tensor of ground truth state sequences
-                iter_num: tensor of the current training iteration (for sched. sampling)
-                k: constant used for scheduled sampling. -1 to feed in own prediction.
-                use_state: True to include state and action in prediction
-                num_masks: the number of different pixel motion predictions (and
-                           the number of masks for each of those predictions)
-                feeding in own predictions
-                num_frame_before_prediction: number of ground truth frames to pass in before
-                                             feeding in own predictions
-            Returns:
-                gen_images: predicted future image frames
-                gen_states: predicted future states
-        """
-        logger = logging.getLogger(__name__)
-        batch_size, color_channels, img_height, img_width = images[0].shape[0:4]
-        
-        # Generated robot states and images
-        gen_states, gen_images = [], []
-        current_state = states[0]
-
-        if scheduled_sampling_k == -1:
-            feedself = True
-        else:
-            # Scheduled sampling, inverse sigmoid decay
-            # Calculate number of ground-truth frames to pass in.
-            num_ground_truth = math.exp(iter_num / scheduled_sampling_k)
-            num_ground_truth = scheduled_sampling_k + num_ground_truth
-            num_ground_truth = scheduled_sampling_k / num_ground_truth
-            num_ground_truth = int(round(float(batch_size) * num_ground_truth))
-            feedself = False
-
-        #lstm_state1, lstm_state2, lstm_state3, lstm_state4 = None, None, None, None
-        #lstm_state5, lstm_state6, lstm_state7 = None, None, None
-
-        for image, action in zip(images[:-1], actions[:-1]):
-            # Reuse variables after the first timestep
-            reuse = bool(gen_images)
-
-            done_warm_start = len(gen_images) > num_frame_before_prediction - 1
-            if feedself and done_warm_start:
-                # Feed in generated image
-                prev_image = gen_images[-1]
-                logger.info("Feed in generated image")
-            elif done_warm_start:
-                # Scheduled sampling
-                prev_image = scheduled_sample(image, gen_images[-1], batch_size, num_ground_truth)
-                logger.info("Feed in scheduled_sample")
-            else:
-                # Always feed in ground_truth
-                prev_image = variable.Variable(image)
-                logger.info("Feed in normal image")
-
-            # Predicted state is always fed back in
-            state_action = F.concat((action, current_state), axis=1)
-
-            enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)(prev_image)
-            # TensorFlow code use layer_normalization for normalize on the output convolution
-            enc0 = layer_normalization_conv_2d(enc0)
-            
-            hidden1, self.lstm_state1 = self.stateless_lstm(inputs=enc0, state=self.lstm_state1, num_channels=32)
-            hidden1 = layer_normalization_conv_2d(hidden1)
-            hidden2, self.lstm_state2 = self.stateless_lstm(inputs=hidden1, state=self.lstm_state2, num_channels=32)
-            hidden2 = layer_normalization_conv_2d(hidden2)
-            enc1 = L.Convolution2D(in_channels=hidden2.shape[1], out_channels=hidden2.shape[2], ksize=(3,3), stride=2, pad=3/2)(hidden2)
-
-            hidden3, self.lstm_state3 = self.stateless_lstm(inputs=enc1, state=self.lstm_state3, num_channels=64)
-            hidden3 = layer_normalization_conv_2d(hidden3)
-            hidden4, self.lstm_state4 = self.stateless_lstm(inputs=hidden3, state=self.lstm_state4, num_channels=64)
-            hidden4 = layer_normalization_conv_2d(hidden4)
-            enc2 = L.Convolution2D(in_channels=hidden4.shape[1], out_channels=hidden4.shape[1], ksize=(3,3), stride=2, pad=3/2)(hidden4)
-
-            # Pass in state and action
-            smear = F.reshape(state_action, (int(batch_size), int(state_action.shape[1]), 1, 1))
-            smear = F.tile(smear, (1, 1, int(enc2.shape[2]), int(enc2.shape[3])))
-
-            if use_state:
-                enc2 = F.concat((enc2, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
-            enc3 = L.Convolution2D(in_channels=enc2.shape[1], out_channels=hidden4.shape[1], ksize=(1,1), stride=1, pad=1/2)(enc2)
- 
-            hidden5, self.lstm_state5 = self.stateless_lstm(inputs=enc3, state=self.lstm_state5, num_channels=128)
-            hidden5 = layer_normalization_conv_2d(hidden5)
-            # ** Had to add outsize + pad!
-            enc4 = L.Deconvolution2D(in_channels=hidden5.shape[1], out_channels=hidden5.shape[1], ksize=(3,3), stride=2, outsize=(hidden5.shape[2]*2, hidden5.shape[3]*2), pad=3/2)(hidden5)
-
-            hidden6, self.lstm_state6 = self.stateless_lstm(inputs=enc4, state=self.lstm_state6, num_channels=64)
-            hidden6 = layer_normalization_conv_2d(hidden6)
-            # Skip connection
-            hidden6 = F.concat((hidden6, enc1), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
-
-            # ** Had to add outsize + pad!
-            enc5 = L.Deconvolution2D(in_channels=hidden6.shape[1], out_channels=hidden6.shape[1], ksize=(3,3), stride=2, outsize=(hidden6.shape[2]*2, hidden6.shape[3]*2), pad=3/2)(hidden6)
-            hidden7, self.lstm_state7 = self.stateless_lstm(inputs=enc5, state=self.lstm_state7, num_channels=32)
-            hidden7 = layer_normalization_conv_2d(hidden7)
-            # Skip connection
-            hidden7 = F.concat((hidden7, enc0), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
-
-            # ** Had to add outsize + pad!
-            enc6 = L.Deconvolution2D(in_channels=hidden7.shape[1], out_channels=hidden7.shape[1], ksize=(3,3), stride=2, outsize=(hidden7.shape[2]*2, hidden7.shape[3]*2), pad=3/2)(hidden7)
-            enc6 = layer_normalization_conv_2d(enc6)
-
-            # DNA specific
-            enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=5**2, ksize=(1,1), stride=1)(enc6)
-            if num_masks != 1:
-                raise ValueError('Only one mask is supported for DNA model.')
-
-            # Construct translated images
-            prev_image_pad = F.pad(prev_image, pad_width=[[0,0], [0,0], [2,2], [2,2]], mode='constant', constant_values=0)
-            kernel_inputs = []
-            for xkern in range(5):
-                for ykern in range(5):
-                    #tmp = F.get_item(prev_image_pad, [prev_image_pad.shape[0], prev_image_pad.shape[0], xkern:img_height, ykern:img_width])
-                    tmp = F.get_item(prev_image_pad, list([slice(0,prev_image_pad.shape[0]), slice(0,prev_image_pad.shape[1]), slice(xkern,img_height), slice(ykern,img_width)]))
-                    # ** Added this operation to make sure the size was still the original one!
-                    tmp = F.pad(tmp, [[0,0], [0,0], [0, xkern], [0, ykern]], mode='constant', constant_values=0)
-                    tmp = F.expand_dims(tmp, axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
-                    kernel_inputs.append(tmp.data)
-            kernel_inputs = F.concat(kernel_inputs, axis=1) # Previously axis=3 but our channel us on axis=1 ? ok!
-
-            # Normalize channels to 1
-            kernel_normalized = F.relu(enc7 - 1e-12) + 1e+12
-            kernel_normalized_sum = F.sum(kernel_normalized, axis=1, keepdims=True) # Previously axis=3 but our channel are on axis 1 ? ok!
-            kernel_normalized = broadcasted_division(kernel_normalized, kernel_normalized_sum)
-            kernel_normalized = F.expand_dims(kernel_normalized, axis=2)
-            kernel_normalized = F.scale(kernel_inputs, kernel_normalized, axis=0)
-            kernel_normalized = F.sum(kernel_normalized, axis=1, keepdims=False)
-            transformed = [kernel_normalized]
-
-            # Masks
-            masks = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=num_masks+1, ksize=(1,1), stride=1)(enc6)
-            masks = F.reshape(masks, (-1, num_masks + 1))
-            masks = F.softmax(masks)
-            masks = F.reshape(masks, (int(batch_size), num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1? ok!
-            mask_list = F.split_axis(masks, indices_or_sections=num_masks+1, axis=1) # Previously axis=3 but our channels are on axis=1 ? ok!
-            output = F.scale(prev_image, mask_list[0], axis=0)
-            for layer, mask in zip(transformed, mask_list[1:]):
-                output += F.scale(layer, mask, axis=0)
-            gen_images.append(output)
-
-            current_state = L.Linear(in_size=None, out_size=current_state.shape[1])(state_action)
-            gen_states.append(current_state)
-
-            logger.info("StatelessDNA sub-iteration done")
-
-        return gen_images, gen_states
-
-class StatelessSTP(chainer.Chain):
-    """
-        Build convolutional lstm video predictor using STP
-        * Because the STP does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
-    """
-    
-    def __init__(self):
-        super(StatelessSTP, self).__init__(
-            stateless_lstm = BasicConvLSTMCell()
-        )
-
-    def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
-        """
-            Learn through StatelessSTP. Because it's stateless, we need to feed the state of the previous iteration if one do not one to start anew
-            Args:
-                images: tensor of ground truth image sequences
-                actions: tensor of action sequences
-                states: tensor of ground truth state sequences
-                iter_num: tensor of the current training iteration (for sched. sampling)
-                k: constant used for scheduled sampling. -1 to feed in own prediction.
-                use_state: True to include state and action in prediction
-                num_masks: the number of different pixel motion predictions (and
-                           the number of masks for each of those predictions)
-                feeding in own predictions
-                num_frame_before_prediction: number of ground truth frames to pass in before
-                                             feeding in own predictions
-            Returns:
-                gen_images: predicted future image frames
-                gen_states: predicted future states
-        """
-        logger = logging.getLogger(__name__)
-        batch_size, color_channels, img_height, img_width = images[0].shape[0:4]
-        
-        # Generated robot states and images
-        gen_states, gen_images = [], []
-        current_state = states[0]
-
-        if scheduled_sampling_k == -1:
-            feedself = True
-        else:
-            # Scheduled sampling, inverse sigmoid decay
-            # Calculate number of ground-truth frames to pass in.
-            num_ground_truth = math.exp(iter_num / scheduled_sampling_k)
-            num_ground_truth = scheduled_sampling_k + num_ground_truth
-            num_ground_truth = scheduled_sampling_k / num_ground_truth
-            num_ground_truth = int(round(float(batch_size) * num_ground_truth))
-            feedself = False
-
-        lstm_state1, lstm_state2, lstm_state3, lstm_state4 = None, None, None, None
-        lstm_state5, lstm_state6, lstm_state7 = None, None, None
-
-        for image, action in zip(images[:-1], actions[:-1]):
-            # Reuse variables after the first timestep
-            reuse = bool(gen_images)
-
-            done_warm_start = len(gen_images) > num_frame_before_prediction - 1
-            if feedself and done_warm_start:
-                # Feed in generated image
-                prev_image = gen_images[-1]
-                logger.info("Feed in generated image")
-            elif done_warm_start:
-                # Scheduled sampling
-                prev_image = scheduled_sample(image, gen_images[-1], batch_size, num_ground_truth)
-                logger.info("Feed in scheduled_sample")
-            else:
-                # Always feed in ground_truth
-                prev_image = variable.Variable(image)
-                logger.info("Feed in normal image")
-
-            # Predicted state is always fed back in
-            state_action = F.concat((action, current_state), axis=1)
-
-            enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)(prev_image)
-            # TensorFlow code use layer_normalization for normalize on the output convolution
-            enc0 = layer_normalization_conv_2d(enc0)
-            
-            hidden1, lstm_state1 = self.stateless_lstm(inputs=enc0, state=lstm_state1, num_channels=32)
-            hidden1 = layer_normalization_conv_2d(hidden1)
-            hidden2, lstm_state2 = self.stateless_lstm(inputs=hidden1, state=lstm_state2, num_channels=32)
-            hidden2 = layer_normalization_conv_2d(hidden2)
-            enc1 = L.Convolution2D(in_channels=hidden2.shape[1], out_channels=hidden2.shape[2], ksize=(3,3), stride=2, pad=3/2)(hidden2)
-
-            hidden3, lstm_state3 = self.stateless_lstm(inputs=enc1, state=lstm_state3, num_channels=64)
-            hidden3 = layer_normalization_conv_2d(hidden3)
-            hidden4, lstm_state4 = self.stateless_lstm(inputs=hidden3, state=lstm_state4, num_channels=64)
-            hidden4 = layer_normalization_conv_2d(hidden4)
-            enc2 = L.Convolution2D(in_channels=hidden4.shape[1], out_channels=hidden4.shape[1], ksize=(3,3), stride=2, pad=3/2)(hidden4)
-
-            # Pass in state and action
-            smear = F.reshape(state_action, (int(batch_size), int(state_action.shape[1]), 1, 1))
-            smear = F.tile(smear, (1, 1, int(enc2.shape[2]), int(enc2.shape[3])))
-
-            if use_state:
-                enc2 = F.concat((enc2, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
-            enc3 = L.Convolution2D(in_channels=enc2.shape[1], out_channels=hidden4.shape[1], ksize=(1,1), stride=1, pad=1/2)(enc2)
- 
-            hidden5, lstm_state5 = self.stateless_lstm(inputs=enc3, state=lstm_state5, num_channels=128)
-            hidden5 = layer_normalization_conv_2d(hidden5)
-            # ** Had to add outsize + pad!
-            enc4 = L.Deconvolution2D(in_channels=hidden5.shape[1], out_channels=hidden5.shape[1], ksize=(3,3), stride=2, outsize=(hidden5.shape[2]*2, hidden5.shape[3]*2), pad=3/2)(hidden5)
-
-            hidden6, lstm_state6 = self.stateless_lstm(inputs=enc4, state=lstm_state6, num_channels=64)
-            hidden6 = layer_normalization_conv_2d(hidden6)
-            # Skip connection
-            hidden6 = F.concat((hidden6, enc1), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
-
-            # ** Had to add outsize + pad!
-            enc5 = L.Deconvolution2D(in_channels=hidden6.shape[1], out_channels=hidden6.shape[1], ksize=(3,3), stride=2, outsize=(hidden6.shape[2]*2, hidden6.shape[3]*2), pad=3/2)(hidden6)
-            hidden7, lstm_state7 = self.stateless_lstm(inputs=enc5, state=lstm_state7, num_channels=32)
-            hidden7 = layer_normalization_conv_2d(hidden7)
-            # Skip connection
-            hidden7 = F.concat((hidden7, enc0), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
-
-            # ** Had to add outsize + pad!
-            enc6 = L.Deconvolution2D(in_channels=hidden7.shape[1], out_channels=hidden7.shape[1], ksize=(3,3), stride=2, outsize=(hidden7.shape[2]*2, hidden7.shape[3]*2), pad=3/2)(hidden7)
-            enc6 = layer_normalization_conv_2d(enc6)
-
-            # STP specific
-            enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=3, ksize=(1,1), stride=1)(enc6)
-            transformed = list([F.sigmoid(enc7)])
-
-            stp_input0 = F.reshape(hidden5, (int(batch_size), -1))
-            stp_input1 = L.Linear(in_size=None, out_size=100)(stp_input0)
-            identity_params = np.array([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
-            identity_params = np.repeat(identity_params, int(batch_size), axis=0)
-            identity_params = variable.Variable(identity_params)
-
-            stp_transformations = []
-            for i in range(num_masks-1):
-                params = L.Linear(in_size=None, out_size=6)(stp_input1) + identity_params
-                params = F.reshape(params, (int(params.shape[0]), 2, 3))
-                grid = F.spatial_transformer_grid(params, (prev_image.shape[2], prev_image.shape[3]))
-                trans = F.spatial_transformer_sampler(prev_image, grid)
-                stp_transformations.append(trans)
-
-            transformed += stp_transformations
-
-            # Masks
-            masks = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=num_masks+1, ksize=(1,1), stride=1)(enc6)
-            masks = F.reshape(masks, (-1, num_masks + 1))
-            masks = F.softmax(masks)
-            masks = F.reshape(masks, (int(batch_size), num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1? ok!
-            mask_list = F.split_axis(masks, indices_or_sections=num_masks+1, axis=1) # Previously axis=3 but our channels are on axis=1 ?
-            output = F.scale(prev_image, mask_list[0], axis=0)
-            for layer, mask in zip(transformed, mask_list[1:]):
-                output += F.scale(layer, mask, axis=0)
-            gen_images.append(output)
-
-            current_state = L.Linear(in_size=None, out_size=current_state.shape[1])(state_action)
-            gen_states.append(current_state)
-            logger.info("StatelessCDNA sub-iteration done")
-
-        return gen_images, gen_states
-
-
-class Model(chainer.Chain):
-    """
-        This Model wrap other models like CDNA, STP or DNA.
-        It calls their training and get the generated images and states, it then compute the losses and other various parameters
-    """
-    
-    def __init__(self, is_cdna=True, is_dna=False, is_stp=False, prefix=None):
-        """
-            Initialize a CDNA, STP or DNA through this 'wrapper' Model
-            Args:
-                is_cdna: if the model should be an extension of CDNA
-                is_dna: if the model should be an extension of DNA
-                is_stp: if the model should be an extension of STP
-                prefix: appended to the results to differentiate between training and validation
-                learning_rate: learning rate
-        """
-        super(Model, self).__init__()
-        self.prefix = prefix
-
-        self.psnr_all = 0
-        self.loss = 0
-        self.train_op = 0
-
-        model = None
-        if is_cdna:
-            model = StatelessCDNA()
-        elif is_stp:
-            model = StatelessSTP()
-        elif is_dna:
-            model = StatelessDNA()
-        if model is None:
-            raise ValueError("No network specified")
-        else:
-            self.add_link('model', model)
-
-    def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
-        """
-            Calls the training process
-            Args:
-                images: an array of Tensor of shape batch x channels x height x width
-                actions: an array of Tensor of shape batch x action
-                states: an array of Tensor of shape batch x state
-                iter_num: iteration (epoch) index
-                scheduled_sampling_k: the hyperparameter k for sheduled sampling
-                use_state: if the model should use action+state
-                num_masks: number of masks
-                num_frame_before_prediction: number of frame before prediction
-            Returns:
-                loss, all the peak signal to noise ratio, summaries
-        """
-        gen_images, gen_states = self.model(images, actions, states, iter_num, scheduled_sampling_k, use_state, num_masks, num_frame_before_prediction)
+        # End of transformations
 
         # L2 loss, PSNR for eval
         loss, psnr_all = 0.0, 0.0
@@ -776,6 +559,7 @@ class Model(chainer.Chain):
             summaries.append(self.prefix + '_recon_cost' + str(i) + ': ' + str(recon_cost.data))
             summaries.append(self.prefix + '_psnr' + str(i) + ': ' + str(psnr_i.data))
             loss += recon_cost
+            print(recon_cost.data)
 
         for i, state, gen_state in zip(range(len(gen_states)), states[num_frame_before_prediction:], gen_states[num_frame_before_prediction - 1:]):
             state = variable.Variable(state)
@@ -785,7 +569,10 @@ class Model(chainer.Chain):
         
         summaries.append(self.prefix + '_psnr_all: ' + str(psnr_all.data))
         self.psnr_all = psnr_all
+        print("BEFORE LOSS: ", loss.data)
         self.loss = loss = loss / np.float32(len(images) - num_frame_before_prediction)
+        print("AFTER LOSS: ", self.loss.data)
+        exit()
         summaries.append(self.prefix + '_loss: ' + str(loss.data))
         
         return self.loss, self.psnr_all, summaries
