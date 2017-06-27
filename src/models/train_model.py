@@ -30,6 +30,27 @@ import logging
 # Helpers functions used accross scripts (hlpe)
 # =============================================
 
+def concat_examples(batch):
+    img_training_set, act_training_set, sta_training_set = [], [], []
+    for idx in xrange(len(batch)):
+        img_training_set.append(batch[idx][0])
+        act_training_set.append(batch[idx][1])
+        sta_training_set.append(batch[idx][2])
+
+    img_training_set = np.array(img_training_set)
+    act_training_set = np.array(act_training_set)
+    sta_training_set = np.array(sta_training_set)
+
+    # Split the actions, states and images into timestep
+    act_training_set = np.split(ary=act_training_set, indices_or_sections=act_training_set.shape[1], axis=1)
+    act_training_set = [np.squeeze(act) for act in act_training_set]
+    sta_training_set = np.split(ary=sta_training_set, indices_or_sections=sta_training_set.shape[1], axis=1)
+    sta_training_set = [np.squeeze(sta) for sta in sta_training_set]
+    img_training_set = np.split(ary=img_training_set, indices_or_sections=img_training_set.shape[1], axis=1)
+    # Reshape the img training set to a Chainer compatible tensor : batch x channel x height x width instead of Tensorflow's: batch x height x width x channel
+    img_training_set = [np.rollaxis(np.squeeze(img), 3, 1) for img in img_training_set]
+
+    return np.array(img_training_set), np.array(act_training_set), np.array(sta_training_set)
 
 def scheduled_sample(ground_truth_x, generated_x, batch_size, num_ground_truth):
     """
@@ -303,8 +324,8 @@ class StatelessDNA(chainer.Chain):
             raise ValueError('Only one mask is supported for DNA model.')
 
         # Construct translated images
-        image_height = prev_image.shape[2]
-        image_width = prev_image.shape[3]
+        img_height = prev_image.shape[2]
+        img_width = prev_image.shape[3]
         prev_image_pad = F.pad(prev_image, pad_width=[[0,0], [0,0], [2,2], [2,2]], mode='constant', constant_values=0)
         kernel_inputs = []
         for xkern in range(5):
@@ -569,13 +590,13 @@ class Model(chainer.Chain):
         
         summaries.append(self.prefix + '_psnr_all: ' + str(psnr_all.data))
         self.psnr_all = psnr_all
-        print("BEFORE LOSS: ", loss.data)
+
         self.loss = loss = loss / np.float32(len(images) - num_frame_before_prediction)
-        print("AFTER LOSS: ", self.loss.data)
-        exit()
         summaries.append(self.prefix + '_loss: ' + str(loss.data))
         
-        return self.loss, self.psnr_all, summaries
+        self.summaries = summaries
+        
+        return self.loss
 
 
 # =================================================
@@ -614,6 +635,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
     model_suffix_dir = "{0}-{1}-{2}".format(time.strftime("%Y%m%d-%H%M%S"), model_type, batch_size)
     training_suffix = "{0}".format('training')
     validation_suffix = "{0}".format('validation')
+    state_suffix = "{0}".format('state')
 
     logger.info("Fetching the models and inputs")
     data_map = []
@@ -637,8 +659,8 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
         states.append(np.float32(np.load(data_dir + '/' + data_map[i][4])))
 
     images = np.asarray(images, dtype=np.float32)
-    actions = np.asarray(actions)
-    states = np.asarray(states)
+    actions = np.asarray(actions, dtype=np.float32)
+    states = np.asarray(states, dtype=np.float32)
 
     train_val_split_index = int(np.floor(train_val_split * len(images)))
     images_training = np.asarray(images[:train_val_split_index])
@@ -668,15 +690,34 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
     )
 
     # Create the optimizers for the models
-    #optimizer = chainer.optimizers.Adam(alpha=learning_rate)
-    #optimizer.setup(training_model) 
-
-    # @TODO: Create some kind of savers to resume training
+    optimizer = chainer.optimizers.Adam(alpha=learning_rate)
+    optimizer.setup(training_model) 
 
     # Training
     if gpu > -1:
         chainer.cuda.get_device_from_id(gpu).use()
         model.to_gpu()
+
+    # Create the batches for Chainer's implementation of the iterator
+    # Group the images, actions and states
+    grouped_set_training = []
+    grouped_set_validation = []
+    for idx in xrange(len(images_training)):
+        group = []
+        group.append(images_training[idx])
+        group.append(actions_training[idx])
+        group.append(states_training[idx])
+        grouped_set_training.append(group)
+    for idx in xrange(len(images_validation)):
+        group = []
+        group.append(images_validation[idx])
+        group.append(actions_validation[idx])
+        group.append(states_validation[idx])
+        grouped_set_validation.append(group)
+
+    #train_iter = chainer.iterators.SerialIterator(grouped_set_training, batch_size)
+    train_iter = chainer.iterators.SerialIterator(grouped_set_training, batch_size, repeat=False, shuffle=False)
+    valid_iter = chainer.iterators.SerialIterator(grouped_set_validation, batch_size, repeat=False, shuffle=False)
 
     # Run training
     # As per Finn's implementation, one epoch is run on one batch size, randomly, but never more than once.
@@ -690,102 +731,58 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
     validation_queue = []
     fill_length_training = batch_size - (len(images_training) % batch_size)
     fill_length_validation = batch_size - (len(images_validation) % batch_size if len(images_validation) > batch_size else batch_size%len(images_validation))
-    for itr in xrange(epoch):
-        if len(training_queue) == 0:
-            # Create random partition for the batches
-            #training_queue = random.sample(range(len(images_training)), len(images_training)) + random.sample(range(len(images_training)), fill_length_training)
-            training_queue = range(len(images_training) + fill_length_training)
-            training_queue = [training_queue[i:i+batch_size] for i in xrange(0, len(images_training), batch_size)]
-
-        # Create batches
-        training_range_indexes = training_queue.pop(0)
-        img_training_set = []
-        act_training_set = []
-        sta_training_set = []
-        for idx in training_range_indexes:
-            img_training_set.append(images_training[idx])
-            act_training_set.append(actions_training[idx])
-            sta_training_set.append(states_training[idx])
-        img_training_set = np.asarray(img_training_set)
-        act_training_set = np.asarray(act_training_set)
-        sta_training_set = np.asarray(sta_training_set)
-    
-        # Split the actions, states and images into timestep
-        act_training_set = np.split(ary=act_training_set, indices_or_sections=act_training_set.shape[1], axis=1)
-        act_training_set = [np.squeeze(act) for act in act_training_set]
-        sta_training_set = np.split(ary=sta_training_set, indices_or_sections=sta_training_set.shape[1], axis=1)
-        sta_training_set = [np.squeeze(sta) for sta in sta_training_set]
-        img_training_set = np.split(ary=img_training_set, indices_or_sections=img_training_set.shape[1], axis=1)
-        # Reshape the img training set to a Chainer compatible tensor : batch x channel x height x width instead of Tensorflow's: batch x height x width x channel
-        img_training_set = [np.rollaxis(np.squeeze(img), 3, 1) for img in img_training_set]
-        #img_training_set = [np.squeeze(img) for img in img_training_set]
+    #for itr in xrange(epoch):
+    while train_iter.epoch < epoch:
+        itr = train_iter.epoch
+        batch = train_iter.next()
+        img_training_set, act_training_set, sta_training_set = concat_examples(batch)
 
         # Perform training
-        logger.info("Begining training for epoch {}".format(str(itr+1)))
-        loss, psnr_all, summaries = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-        #optimizer.update()
+        logger.info("Begining training for mini-batch {0}-{1}/{2} of epoch {3}".format(str(train_iter.current_position-batch_size), str(min(len(images_training), train_iter.current_position)), str(len(images_training)), str(itr+1)))
+        #loss = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+        optimizer.update(training_model, img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+        loss = training_model.loss
+        psnr_all = training_model.psnr_all
+        summaries = training_model.summaries
 
         global_losses.append(loss.data)
         global_psnr_all.append(psnr_all.data)
 
         logger.info("{0} {1}".format(str(itr+1), str(loss.data)))
         loss_valid, psnr_all_valid, summaries_valid = None, None, []
-        if itr+1 % validation_interval == 0:
-            if len(validation_queue) == 0:
-                # Create random partition for the batches
-                # If the length of the validation is < fill_length_validation, make sure to pad it
-                pad = fill_length_validation
-                validation_queue = random.sample(range(len(images_validation)), len(images_validation))
-                while pad > 0:
-                    p = min(fill_length_validation, len(images_validation))
-                    p = min(p, pad)
-                    pad = pad-p
-                    validation_queue += random.sample(range(len(images_validation)), p)
 
-                validation_queue = [validation_queue[i:i+batch_size] for i in xrange(0, max(batch_size,len(images_validation)), batch_size)]
+        if train_iter.is_new_epoch and itr+1 % validation_interval == 0:
 
-            # Create batches
-            validation_range_indexes = validation_queue.pop(0)
-            img_validation_set = []
-            act_validation_set = []
-            sta_validation_set = []
+            for batch in valid_iter:
+                logger.info("Begining validation for mini-batch {0}-{1}/{2} of epoch {3}".format(str(min(0,valid_iter.current_position-batch_size)), str(min(len(images_validation), valid_iter.current_position)), str(len(images_validation)), str(itr+1)))
+                batch = np.array(batch)
+                img_validation_set, act_validation_set, sta_validation_set = concat_examples(batch)
+                
+                # Run through validation set
+                #loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+                loss_valid = training_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+                psnr_all_valid = training_model.psnr_all
+                summaries_valid = training_model.summaries
 
-            for idx in validation_range_indexes:
-                img_validation_set.append(images_validation[idx])
-                act_validation_set.append(actions_validation[idx])
-                sta_validation_set.append(states_validation[idx])
-            img_validation_set = np.asarray(img_validation_set)
-            act_validation_set = np.asarray(act_validation_set)
-            sta_validation_set = np.asarray(sta_validation_set)
+                global_losses_valid.append(loss_valid.data)
+                global_psnr_all_valid.append(psnr_all_valid.data)
+            
+            valid_iter.reset()
 
-            act_validation_set = np.split(ary=act_validation_set, indices_or_sections=act_validation_set.shape[1], axis=1)
-            act_validation_set = [np.squeeze(act) for act in act_validation_set]
-            sta_validation_set = np.split(ary=sta_validation_set, indices_or_sections=sta_validation_set.shape[1], axis=1)
-            sta_validation_set = [np.squeeze(sta) for sta in sta_validation_set]
-            img_validation_set = np.split(ary=img_validation_set, indices_or_sections=img_validation_set.shape[1], axis=1)
-            img_validation_set = [np.squeeze(img) for img in img_validation_set]
-            # Reshape the img training set to a Chainer compatible tensor : batch x channel x height x width instead of Tensorflow's: batch x height x width x channel
-            img_validation_set = [np.transpose(np.squeeze(img), (0, 3, 1, 2)) for img in img_validation_set]
+        if itr % save_interval == 0:
+            logger.info('Saving model')
 
-            # Run through validation set
-            loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+            save_dir = output_dir + '/' + model_suffix_dir
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
 
-            global_losses_valid.append(loss_valid.data)
-            global_psnr_all_valid.append(psnr_all_valid.data)
-
-        #if itr % save_interval == 0:
-        #    logger.info('Saving model')
-        #    # @TODO: Save the model
-        #    save_dir = output_dir + '/' + model_suffix_dir
-        #    if not os.path.exists(save_dir):
-        #        os.makedirs(save_dir)
-
-        #    serializers.save_npz(save_dir + '/' + training_suffix + '-' + str(itr), training_model)
-        #    serializers.save_npz(save_dir + '/' + validation_suffix + '-' + str(itr), validation_model)
-        #    np.save(save_dir + '/' + training_suffix + '-global_losses', np.array(global_losses))
-        #    np.save(save_dir + '/' + training_suffix + '-global_psnr_all', np.array(global_psnr_all))
-        #    np.save(save_dir + '/' + training_suffix + '-global_losses_valid', np.array(global_losses_valid))
-        #    np.save(save_dir + '/' + training_suffix + '-global_psnr_all', np.array(global_psnr_all_valid))
+            serializers.save_npz(save_dir + '/' + training_suffix + '-' + str(itr), training_model)
+            #serializers.save_npz(save_dir + '/' + validation_suffix + '-' + str(itr), validation_model)
+            serializers.save_npz(save_dir + '/' + state_suffix + '-' + str(itr), optimizer)
+            np.save(save_dir + '/' + training_suffix + '-global_losses', np.array(global_losses))
+            np.save(save_dir + '/' + training_suffix + '-global_psnr_all', np.array(global_psnr_all))
+            np.save(save_dir + '/' + training_suffix + '-global_losses_valid', np.array(global_losses_valid))
+            np.save(save_dir + '/' + training_suffix + '-global_psnr_all', np.array(global_psnr_all_valid))
 
         for summ in summaries:
             logger.info(summ)
