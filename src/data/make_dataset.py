@@ -22,7 +22,8 @@ import csv
 @click.option('--image_resize_height', type=click.INT, default=64, help='Resize height of the the images.')
 @click.option('--state_action_dimension', type=click.INT, default=5, help='Dimension of the state and action.')
 @click.option('--create_img', type=click.INT, default=1, help='Create the bitmap image along the numpy RGB values')
-def main(data_dir, out_dir, sequence_length, image_original_width, image_original_height, image_original_channel, image_resize_width, image_resize_height, state_action_dimension, create_img):
+@click.option('--create_img_prediction', type=click.INT, default=1, help='Create the bitmap image used in the prediction phase')
+def main(data_dir, out_dir, sequence_length, image_original_width, image_original_height, image_original_channel, image_resize_width, image_resize_height, state_action_dimension, create_img, create_img_prediction):
     """ Runs data processing scripts to turn raw data from (../raw) into
         cleaned data ready to be analyzed (saved in ../processed).
     """
@@ -39,6 +40,7 @@ def main(data_dir, out_dir, sequence_length, image_original_width, image_origina
         reader = tf.TFRecordReader()
         _, serialized_example = reader.read(queue)
         image_seq, state_seq, action_seq = [], [], []
+        image_seq_raw = []
 
         for i in xrange(sequence_length):
             image_name = 'move/' + str(i) + '/image/encoded'
@@ -55,6 +57,12 @@ def main(data_dir, out_dir, sequence_length, image_original_width, image_origina
             image_buffer = tf.reshape(features[image_name], shape=[])
             image = tf.image.decode_jpeg(image_buffer, channels=image_original_channel)
             image.set_shape([image_original_height, image_original_width, image_original_channel])
+
+            # Untouched image used in prediction
+            if(create_img_prediction == 1):
+                image_pred = tf.identity(image)
+                image_pred = tf.reshape(image_pred, [1, image_original_height, image_original_width, image_original_channel])
+                image_seq_raw.append(image_pred)
 
             crop_size = min(image_original_width, image_original_height)
             image = tf.image.resize_image_with_crop_or_pad(image, crop_size, crop_size)
@@ -73,6 +81,7 @@ def main(data_dir, out_dir, sequence_length, image_original_width, image_origina
         image_seq = tf.concat(axis=0, values=image_seq)
         state_seq = tf.concat(axis=0, values=state_seq)
         action_seq = tf.concat(axis=0, values=action_seq)
+        image_seq_raw = tf.concat(axis=0, values=image_seq_raw)
 
         #[image_batch, action_batch, state_batch] = tf.train.batch([image_seq, action_seq, state_seq], batch_size, num_threads=batch_size, capacity=100 * batch_size)
 
@@ -88,7 +97,7 @@ def main(data_dir, out_dir, sequence_length, image_original_width, image_origina
         csv_ref = []
         for j in xrange(len(files)):
             logger.info("Creating data from tsrecords {0}/{1}".format(j+1, len(files)))
-            raw, act, sta = sess.run([image_seq, action_seq, state_seq])
+            raw, act, sta, pred = sess.run([image_seq, action_seq, state_seq, image_seq_raw])
             ref = []
             ref.append(j)
 
@@ -107,12 +116,26 @@ def main(data_dir, out_dir, sequence_length, image_original_width, image_origina
             ref.append('image_batch_' + str(j) + '.npy')
             ref.append('action_batch_' + str(j) + '.npy')
             ref.append('state_batch_' + str(j) + '.npy')
+
+            # Image used in prediction
+            if create_img_prediction == 1:
+                np.save(out_dir + '/image_batch_pred_' + str(j), pred)
+
+                for k in xrange(pred.shape[0]):
+                    img = Image.fromarray(pred[k], 'RGB')
+                    img.save(out_dir + '/image_batch_pred_' + str(j) + '_' + str(k) + '.png')
+                ref.append('image_batch_pred_' + str(j) + '_*' + '.png')
+                ref.append('image_batch_pred_' + str(j) + '.npy')
+            else:
+                ref.append('')
+                ref.append('')
+                
             csv_ref.append(ref)
 
         logger.info("Writing the results into map file '{0}'".format('map.csv'))
         with open(out_dir + '/map.csv', 'wb') as csvfile:
             writer = csv.writer(csvfile, quoting=csv.QUOTE_ALL)
-            writer.writerow(['id', 'img_bitmap_path', 'img_np_path', 'action_np_path', 'state_np_path'])
+            writer.writerow(['id', 'img_bitmap_path', 'img_np_path', 'action_np_path', 'state_np_path', 'img_bitmap_pred_path', 'img_np_pred_path'])
             for row in csv_ref:
                 writer.writerow(row)
 

@@ -17,6 +17,7 @@ from chainer.functions.connection import convolution_2d
 from chainer import initializers
 from chainer import serializers
 from chainer.functions.math import square
+from chainer.functions.activation import lstm
 
 import sys
 import os
@@ -25,6 +26,12 @@ import glob
 import csv
 import click
 import logging
+
+# Amount to use when lower bounding Variables
+RELU_SHIFT = 1e-12
+
+# Kernel size for DNA and CDNA
+DNA_KERN_SIZE = 5
 
 # =============================================
 # Helpers functions used accross scripts (hlpe)
@@ -43,12 +50,12 @@ def concat_examples(batch):
 
     # Split the actions, states and images into timestep
     act_training_set = np.split(ary=act_training_set, indices_or_sections=act_training_set.shape[1], axis=1)
-    act_training_set = [np.squeeze(act) for act in act_training_set]
+    act_training_set = [np.squeeze(act, axis=1) for act in act_training_set]
     sta_training_set = np.split(ary=sta_training_set, indices_or_sections=sta_training_set.shape[1], axis=1)
-    sta_training_set = [np.squeeze(sta) for sta in sta_training_set]
+    sta_training_set = [np.squeeze(sta, axis=1) for sta in sta_training_set]
     img_training_set = np.split(ary=img_training_set, indices_or_sections=img_training_set.shape[1], axis=1)
     # Reshape the img training set to a Chainer compatible tensor : batch x channel x height x width instead of Tensorflow's: batch x height x width x channel
-    img_training_set = [np.rollaxis(np.squeeze(img), 3, 1) for img in img_training_set]
+    img_training_set = [np.rollaxis(np.squeeze(img, axis=1), 3, 1) for img in img_training_set]
 
     return np.array(img_training_set), np.array(act_training_set), np.array(sta_training_set)
 
@@ -131,20 +138,22 @@ def conv_2d(inputs, W=None, stride=1, pad=1):
         W = variable.Parameter(W_initializer)
     return convolution_2d.convolution_2d(inputs, None, W, stride, pad)
 
-def layer_normalization_conv_2d(inputs):
+def broadcast_reshape(x, y, axis=0):
     """
-        Apply a "layer normalization" on the result of a convolution
+        Reshape y to correspond to shape of x
 
         Args:
-            inputs: input tensor, 4D, batch x channel x height x width
-        Returns:
-            Output variable of shape (batch x channels x height x width)
+            x: the broadcasted
+            y: the broadcastee
+            axis: where the reshape will be performed
+        Results:
+            Output variable of same shape of x
     """
-    batch_size, channels, height, width = inputs.shape[0:4]
-    inputs = F.reshape(inputs, (batch_size, -1))
-    inputs = L.LayerNormalization()(inputs)
-    inputs = F.reshape(inputs, (batch_size, channels, height, width))
-    return inputs
+    y_shape = tuple([1] * axis + list(y.shape) +
+                [1] * (len(x.shape) - axis - len(y.shape)))
+    y_t = F.reshape(y, y_shape)
+    y_t = F.broadcast_to(y_t, x.shape)
+    return y_t
 
 def broadcasted_division(x, y, axis=0):
     """
@@ -157,11 +166,47 @@ def broadcasted_division(x, y, axis=0):
         Results:
             Output variable of same shape of x
     """
-    y_shape = tuple([1] * axis + list(y.shape) +
-                [1] * (len(x.shape) - axis - len(y.shape)))
-    y_t = F.reshape(y, y_shape)
-    y_t = F.broadcast_to(y_t, x.shape)
+    y_t = broadcast_reshape(x, y, axis)
     return x / y_t
+
+def broadcast_scale(x, y, axis=0):
+    """ Apply a multiplicatation x*y where y is broadcasted to x to be able to complete the operation
+
+        Args:
+            x: left hand operation
+            y: right hand operation
+            axis: where the reshape will be performed
+        Resuts:
+            Output variable of same shape of x
+    """
+    y_t = broadcast_reshape(x, y, axis)
+    return x*y_t
+
+
+# =============
+# Chains (chns)
+# =============
+class LayerNormalizationConv2D(chainer.Chain):
+    def __init__(self):
+        super(LayerNormalizationConv2D, self).__init__(
+            norm = L.LayerNormalization()
+        )
+    
+    """
+        Apply a "layer normalization" on the result of a convolution
+
+        Args:
+            inputs: input tensor, 4D, batch x channel x height x width
+        Returns:
+            Output variable of shape (batch x channels x height x width)
+    """
+    def __call__(self, inputs):
+        batch_size, channels, height, width = inputs.shape[0:4]
+        inputs = F.reshape(inputs, (batch_size, -1))
+        inputs = self.norm(inputs)
+        inputs = F.reshape(inputs, (batch_size, channels, height, width))
+        return inputs
+
 
 # =============
 # Models (mdls)
@@ -171,8 +216,11 @@ def broadcasted_division(x, y, axis=0):
 class BasicConvLSTMCell(chainer.Chain):
     """ Stateless convolutional LSTM, as seen in lstm_op.py from video_prediction model """
 
-    def __init__(self):
+    def __init__(self, in_size, out_size):
         super(BasicConvLSTMCell, self).__init__()
+
+        self.in_size = in_size,
+        self.out_size = out_size
 
     def __call__(self, inputs, state, num_channels, filter_size=5, forget_bias=1.0):
         """Basic LSTM recurrent network cell, with 2D convolution connctions.
@@ -200,7 +248,8 @@ class BasicConvLSTMCell(chainer.Chain):
             state_size = (inputs.shape[0], 2*num_channels, inputs.shape[2], inputs.shape[3]) 
             state = self.xp.zeros(state_size, dtype=inputs[0].data.dtype)
 
-        h, c = F.split_axis(state, indices_or_sections=2, axis=1)
+        c, h = F.split_axis(state, indices_or_sections=2, axis=1)
+
         #inputs_h = np.concatenate((inputs, h), axis=1)
         inputs_h = F.concat((inputs, h), axis=1)
 
@@ -208,8 +257,7 @@ class BasicConvLSTMCell(chainer.Chain):
         i_j_f_o = L.Convolution2D(in_channels=inputs_h.shape[1], out_channels=4*num_channels, ksize=(filter_size, filter_size), pad=filter_size/2)(inputs_h)
 
         # i = input_gate, j = new_input, f = forget_gate, o = output_gate
-        #i, j, f, o = np.split(ary=i_j_f_o, indices_or_sections=4, axis=1)
-        i, j, f, o = F.split_axis(i_j_f_o, indices_or_sections=4, axis=1)
+        j, i, f, o = F.split_axis(i_j_f_o, indices_or_sections=4, axis=1)
 
         new_c = c * F.sigmoid(f + forget_bias) + F.sigmoid(i) * F.tanh(j)
         new_h = F.tanh(new_c) * F.sigmoid(o)
@@ -223,8 +271,13 @@ class StatelessCDNA(chainer.Chain):
         * Because the CDNA does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
     """
     
-    def __init__(self):
-        super(StatelessCDNA, self).__init__()
+    def __init__(self, num_masks):
+        super(StatelessCDNA, self).__init__(
+            enc7 = L.Deconvolution2D(in_channels=64, out_channels=3, ksize=(1,1), stride=1),
+            cdna_kerns = L.Linear(in_size=None, out_size=DNA_KERN_SIZE * DNA_KERN_SIZE * num_masks)
+        )
+
+        self.num_masks = num_masks
 
     def __call__(self, lstm_states, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
         """
@@ -247,19 +300,19 @@ class StatelessCDNA(chainer.Chain):
         hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
 
         # CDNA specific
-        enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=3, ksize=(1,1), stride=1)(enc6)
+        enc7 = self.enc7(enc6)
         enc7 = F.relu(enc7)
         transformed = list([F.sigmoid(enc7)])
 
         # CDNA specific
         # Predict kernels using linear function of last layer
         cdna_input = F.reshape(hidden5, (int(batch_size), -1))
-        cdna_kerns = L.Linear(in_size=None, out_size=5*5*num_masks)(cdna_input)
+        cdna_kerns = self.cdna_kerns(cdna_input)
         
         # Reshape and normalize
         #cdna_kerns = F.reshape(cdna_kerns, (batch_size, 1, 5, 5, num_masks))
-        cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), num_masks, 1, 5, 5))
-        cdna_kerns = F.relu(cdna_kerns - 1e-12) + 1e-12
+        cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), self.num_masks, 1, DNA_KERN_SIZE, DNA_KERN_SIZE))
+        cdna_kerns = F.relu(cdna_kerns - RELU_SHIFT) + RELU_SHIFT
         norm_factor = F.sum(cdna_kerns, (2, 3, 4), keepdims=True)
 
         # The norm factor is broadcasted to match the shape difference
@@ -280,10 +333,12 @@ class StatelessCDNA(chainer.Chain):
             kernel = F.squeeze(kernel)
             if len(kernel.shape) == 3:
                 kernel = kernel[..., np.keepdims]
+            if len(preimg.shape) ==3:
+                preimg = F.expand_dims(preimg, axis=0)
             conv = F.depthwise_convolution_2d(preimg, kernel, stride=(1, 1), pad=kernel.shape[2]/2)
             tmp_transformed.append(conv)
         tmp_transformed = F.concat(tmp_transformed, axis=0)
-        tmp_transformed = F.split_axis(tmp_transformed, indices_or_sections=num_masks, axis=1) # Previously axis=3 but our channels are on axis=1 ? ok!
+        tmp_transformed = F.split_axis(tmp_transformed, indices_or_sections=self.num_masks, axis=1) # Previously axis=3 but our channels are on axis=1 ? ok!
         transformed = transformed + list(tmp_transformed)
 
         return transformed
@@ -295,8 +350,12 @@ class StatelessDNA(chainer.Chain):
         * Because the DNA does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
     """
     
-    def __init__(self):
-        super(StatelessDNA, self).__init__()
+    def __init__(self, num_masks):
+        super(StatelessDNA, self).__init__(
+            enc7 = L.Deconvolution2D(in_channels=64, out_channels=DNA_KERN_SIZE**2, ksize=(1,1), stride=1),
+            
+        )
+        self.num_masks = num_masks
 
     def __call__(self, lstm_states, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
         """
@@ -319,7 +378,7 @@ class StatelessDNA(chainer.Chain):
         hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
 
         # DNA specific
-        enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=5**2, ksize=(1,1), stride=1)(enc6)
+        enc7 = self.enc7(enc6)
         if num_masks != 1:
             raise ValueError('Only one mask is supported for DNA model.')
 
@@ -328,8 +387,8 @@ class StatelessDNA(chainer.Chain):
         img_width = prev_image.shape[3]
         prev_image_pad = F.pad(prev_image, pad_width=[[0,0], [0,0], [2,2], [2,2]], mode='constant', constant_values=0)
         kernel_inputs = []
-        for xkern in range(5):
-            for ykern in range(5):
+        for xkern in range(DNA_KERN_SIZE):
+            for ykern in range(DNA):
                 #tmp = F.get_item(prev_image_pad, [prev_image_pad.shape[0], prev_image_pad.shape[0], xkern:img_height, ykern:img_width])
                 tmp = F.get_item(prev_image_pad, list([slice(0,prev_image_pad.shape[0]), slice(0,prev_image_pad.shape[1]), slice(xkern,img_height), slice(ykern,img_width)]))
                 # ** Added this operation to make sure the size was still the original one!
@@ -339,7 +398,7 @@ class StatelessDNA(chainer.Chain):
         kernel_inputs = F.concat(kernel_inputs, axis=1) # Previously axis=3 but our channel us on axis=1 ? ok!
 
         # Normalize channels to 1
-        kernel_normalized = F.relu(enc7 - 1e-12) + 1e+12
+        kernel_normalized = F.relu(enc7 - RELU_SHIFT) + RELU_SHIFT
         kernel_normalized_sum = F.sum(kernel_normalized, axis=1, keepdims=True) # Previously axis=3 but our channel are on axis 1 ? ok!
         kernel_normalized = broadcasted_division(kernel_normalized, kernel_normalized_sum)
         kernel_normalized = F.expand_dims(kernel_normalized, axis=2)
@@ -356,7 +415,11 @@ class StatelessSTP(chainer.Chain):
     """
     
     def __init__(self):
-        super(StatelessSTP, self).__init__()
+        super(StatelessSTP, self).__init__(
+            enc7 = L.Deconvolution2D(in_channels=64, out_channels=3, ksize=(1,1), stride=1),
+            stp_input = L.Linear(in_size=None, out_size=100),
+            params = L.Linear(in_size=None, out_size=6)
+        )
 
     def __call__(self, lstm_states, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
         """
@@ -379,18 +442,18 @@ class StatelessSTP(chainer.Chain):
         hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
 
         # STP specific
-        enc7 = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=3, ksize=(1,1), stride=1)(enc6)
+        enc7 = self.enc7(enc6)
         transformed = list([F.sigmoid(enc7)])
 
         stp_input0 = F.reshape(hidden5, (int(batch_size), -1))
-        stp_input1 = L.Linear(in_size=None, out_size=100)(stp_input0)
+        stp_input1 = self.stp_input(stp_input0)
         identity_params = np.array([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
         identity_params = np.repeat(identity_params, int(batch_size), axis=0)
         identity_params = variable.Variable(identity_params)
 
         stp_transformations = []
         for i in range(num_masks-1):
-            params = L.Linear(in_size=None, out_size=6)(stp_input1) + identity_params
+            params = self.params(stp_input1) + identity_params
             params = F.reshape(params, (int(params.shape[0]), 2, 3))
             grid = F.spatial_transformer_grid(params, (prev_image.shape[2], prev_image.shape[3]))
             trans = F.spatial_transformer_sampler(prev_image, grid)
@@ -405,7 +468,7 @@ class Model(chainer.Chain):
         It calls their training and get the generated images and states, it then compute the losses and other various parameters
     """
     
-    def __init__(self, is_cdna=True, is_dna=False, is_stp=False, prefix=None):
+    def __init__(self, num_masks, is_cdna=True, is_dna=False, is_stp=False, prefix=None):
         """
             Initialize a CDNA, STP or DNA through this 'wrapper' Model
             Args:
@@ -416,21 +479,46 @@ class Model(chainer.Chain):
                 learning_rate: learning rate
         """
         super(Model, self).__init__(
-            stateless_lstm = BasicConvLSTMCell()
-        )
-        self.prefix = prefix
+	    enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2),
+            enc1 = L.Convolution2D(in_channels=32, out_channels=32, ksize=(3,3), stride=2, pad=3/2),
+            enc2 = L.Convolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, pad=3/2),
+            enc3 = L.Convolution2D(in_channels=74, out_channels=64, ksize=(1,1), stride=1, pad=1/2),
+            enc4 = L.Deconvolution2D(in_channels=128, out_channels=128, ksize=(3,3), stride=2, outsize=(16,16), pad=3/2),
+            enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=3/2),
+            enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64,64), pad=3/2),
 
-        self.psnr_all = 0
-        self.loss = 0
-        self.train_op = 0
+            lstm1 = BasicConvLSTMCell(in_size=None, out_size=32),
+            lstm2 = BasicConvLSTMCell(in_size=None, out_size=32),
+            lstm3 = BasicConvLSTMCell(in_size=None, out_size=64),
+            lstm4 = BasicConvLSTMCell(in_size=None, out_size=64),
+            lstm5 = BasicConvLSTMCell(in_size=None, out_size=128),
+            lstm6 = BasicConvLSTMCell(in_size=None, out_size=64),
+            lstm7 = BasicConvLSTMCell(in_size=None, out_size=32),
+            
+            norm_enc0 = LayerNormalizationConv2D(),
+            norm_enc6 = LayerNormalizationConv2D(),
+            hidden1 = LayerNormalizationConv2D(),
+            hidden2 = LayerNormalizationConv2D(),
+            hidden3 = LayerNormalizationConv2D(),
+            hidden4 = LayerNormalizationConv2D(),
+            hidden5 = LayerNormalizationConv2D(),
+            hidden6 = LayerNormalizationConv2D(),
+            hidden7 = LayerNormalizationConv2D(),
+
+            masks = L.Deconvolution2D(in_channels=64, out_channels=num_masks+1, ksize=(1,1), stride=1),
+
+            current_state = L.Linear(in_size=None, out_size=5)
+	)
+        self.num_masks = num_masks
+        self.prefix = prefix
 
         model = None
         if is_cdna:
-            model = StatelessCDNA()
+            model = StatelessCDNA(num_masks)
         elif is_stp:
-            model = StatelessSTP()
+            model = StatelessSTP(num_masks)
         elif is_dna:
-            model = StatelessDNA()
+            model = StatelessDNA(num_masks)
         if model is None:
             raise ValueError("No network specified")
         else:
@@ -492,23 +580,23 @@ class Model(chainer.Chain):
             # Predicted state is always fed back in
             state_action = F.concat((action, current_state), axis=1)
 
-            enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)(prev_image)
+            enc0 = self.enc0(prev_image)
             enc0 = F.relu(enc0)
             # TensorFlow code use layer_normalization for normalize on the output convolution
-            enc0 = layer_normalization_conv_2d(enc0)
+            enc0 = self.norm_enc0(enc0)
             
-            hidden1, lstm_state1 = self.stateless_lstm(inputs=enc0, state=lstm_state1, num_channels=32)
-            hidden1 = layer_normalization_conv_2d(hidden1)
-            hidden2, lstm_state2 = self.stateless_lstm(inputs=hidden1, state=lstm_state2, num_channels=32)
-            hidden2 = layer_normalization_conv_2d(hidden2)
-            enc1 = L.Convolution2D(in_channels=hidden2.shape[1], out_channels=hidden2.shape[2], ksize=(3,3), stride=2, pad=3/2)(hidden2)
+            hidden1, lstm_state1 = self.lstm1(inputs=enc0, state=lstm_state1, num_channels=32)
+            hidden1 = self.hidden1(hidden1)
+            hidden2, lstm_state2 = self.lstm2(inputs=hidden1, state=lstm_state2, num_channels=32)
+            hidden2 = self.hidden2(hidden2)
+            enc1 = self.enc1(hidden2)
             enc1 = F.relu(enc1)
 
-            hidden3, lstm_state3 = self.stateless_lstm(inputs=enc1, state=lstm_state3, num_channels=64)
-            hidden3 = layer_normalization_conv_2d(hidden3)
-            hidden4, lstm_state4 = self.stateless_lstm(inputs=hidden3, state=lstm_state4, num_channels=64)
-            hidden4 = layer_normalization_conv_2d(hidden4)
-            enc2 = L.Convolution2D(in_channels=hidden4.shape[1], out_channels=hidden4.shape[1], ksize=(3,3), stride=2, pad=3/2)(hidden4)
+            hidden3, lstm_state3 = self.lstm3(inputs=enc1, state=lstm_state3, num_channels=64)
+            hidden3 = self.hidden3(hidden3)
+            hidden4, lstm_state4 = self.lstm4(inputs=hidden3, state=lstm_state4, num_channels=64)
+            hidden4 = self.hidden4(hidden4)
+            enc2 = self.enc2(hidden4)
             enc2 = F.relu(enc2)
 
             # Pass in state and action
@@ -517,32 +605,32 @@ class Model(chainer.Chain):
 
             if use_state:
                 enc2 = F.concat((enc2, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
-            enc3 = L.Convolution2D(in_channels=enc2.shape[1], out_channels=hidden4.shape[1], ksize=(1,1), stride=1, pad=1/2)(enc2)
+            enc3 = self.enc3(enc2)
             enc3 = F.relu(enc3)
  
-            hidden5, lstm_state5 = self.stateless_lstm(inputs=enc3, state=lstm_state5, num_channels=128)
-            hidden5 = layer_normalization_conv_2d(hidden5)
+            hidden5, lstm_state5 = self.lstm5(inputs=enc3, state=lstm_state5, num_channels=128)
+            hidden5 = self.hidden5(hidden5)
             # ** Had to add outsize + pad!
-            enc4 = L.Deconvolution2D(in_channels=hidden5.shape[1], out_channels=hidden5.shape[1], ksize=(3,3), stride=2, outsize=(hidden5.shape[2]*2, hidden5.shape[3]*2), pad=3/2)(hidden5)
+            enc4 = self.enc4(hidden5)
             enc4 = F.relu(enc4)
 
-            hidden6, lstm_state6 = self.stateless_lstm(inputs=enc4, state=lstm_state6, num_channels=64)
-            hidden6 = layer_normalization_conv_2d(hidden6)
+            hidden6, lstm_state6 = self.lstm6(inputs=enc4, state=lstm_state6, num_channels=64)
+            hidden6 = self.hidden6(hidden6)
             # Skip connection
             hidden6 = F.concat((hidden6, enc1), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
 
             # ** Had to add outsize + pad!
-            enc5 = L.Deconvolution2D(in_channels=hidden6.shape[1], out_channels=hidden6.shape[1], ksize=(3,3), stride=2, outsize=(hidden6.shape[2]*2, hidden6.shape[3]*2), pad=3/2)(hidden6)
+            enc5 = self.enc5(hidden6)
             enc5 = F.relu(enc5)
-            hidden7, lstm_state7 = self.stateless_lstm(inputs=enc5, state=lstm_state7, num_channels=32)
-            hidden7 = layer_normalization_conv_2d(hidden7)
+            hidden7, lstm_state7 = self.lstm7(inputs=enc5, state=lstm_state7, num_channels=32)
+            hidden7 = self.hidden7(hidden7)
             # Skip connection
             hidden7 = F.concat((hidden7, enc0), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
 
             # ** Had to add outsize + pad!
-            enc6 = L.Deconvolution2D(in_channels=hidden7.shape[1], out_channels=hidden7.shape[1], ksize=(3,3), stride=2, outsize=(hidden7.shape[2]*2, hidden7.shape[3]*2), pad=3/2)(hidden7)
+            enc6 = self.enc6(hidden7)
             enc6 = F.relu(enc6)
-            enc6 = layer_normalization_conv_2d(enc6)
+            enc6 = self.norm_enc6(enc6)
 
             # Specific model transformations
             transformed = self.model(
@@ -553,18 +641,20 @@ class Model(chainer.Chain):
             )
 
             # Masks
-            masks = L.Deconvolution2D(in_channels=enc6.shape[1], out_channels=num_masks+1, ksize=(1,1), stride=1)(enc6)
+            masks = self.masks(enc6)
             masks = F.relu(masks)
             masks = F.reshape(masks, (-1, num_masks + 1))
             masks = F.softmax(masks)
             masks = F.reshape(masks, (int(batch_size), num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1? ok!
             mask_list = F.split_axis(masks, indices_or_sections=num_masks+1, axis=1) # Previously axis=3 but our channels are on axis=1 ?
-            output = F.scale(prev_image, mask_list[0], axis=0)
+            #output = F.scale(prev_image, mask_list[0], axis=0)
+            output = broadcast_scale(prev_image, mask_list[0], axis=0)
             for layer, mask in zip(transformed, mask_list[1:]):
-                output += F.scale(layer, mask, axis=0)
+                #output += F.scale(layer, mask, axis=0)
+                output += broadcast_scale(layer, mask, axis=0)
             gen_images.append(output)
 
-            current_state = L.Linear(in_size=None, out_size=current_state.shape[1])(state_action)
+            current_state = self.current_state(state_action)
             gen_states.append(current_state)
 
         # End of transformations
@@ -588,13 +678,14 @@ class Model(chainer.Chain):
             summaries.append(self.prefix + '_state_cost' + str(i) + ': ' + str(state_cost.data))
             loss += state_cost
         
-        summaries.append(self.prefix + '_psnr_all: ' + str(psnr_all.data))
+        summaries.append(self.prefix + '_psnr_all: ' + str(psnr_all.data if isinstance(psnr_all, variable.Variable) else psnr_all))
         self.psnr_all = psnr_all
 
         self.loss = loss = loss / np.float32(len(images) - num_frame_before_prediction)
-        summaries.append(self.prefix + '_loss: ' + str(loss.data))
+        summaries.append(self.prefix + '_loss: ' + str(loss.data if isinstance(loss, variable.Variable) else loss))
         
         self.summaries = summaries
+        self.gen_images = gen_images
         
         return self.loss
 
@@ -610,6 +701,7 @@ class Model(chainer.Chain):
 @click.option('--event_log_dir', type=click.Path(), default='models', help='Directory for writing summary.')
 @click.option('--epoch', type=click.INT, default=100000, help='Number of training iterations.')
 @click.option('--pretrained_model', type=click.Path(), default='', help='Filepath of a pretrained model to initialize from.')
+@click.option('--pretrained_state', type=click.Path(), default='', help='Filepath of a pretrained state to initialize from.')
 @click.option('--sequence_length', type=click.INT, default=10, help='Sequence length, including context frames.')
 @click.option('--context_frames', type=click.INT, default=2, help='Number of frames before predictions.')
 @click.option('--use_state', type=click.INT, default=1, help='Whether or not to give the state+action to the model.')
@@ -622,7 +714,11 @@ class Model(chainer.Chain):
 @click.option('--gpu', type=click.INT, default=-1, help='ID of the gpu(s) to use')
 @click.option('--validation_interval', type=click.INT, default=200, help='How often to run a batch through the validation model')
 @click.option('--save_interval', type=click.INT, default=2000, help='How often to save a model checkpoint')
-def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_length, context_frames, use_state, model_type, num_masks, schedsamp_k, train_val_split, batch_size, learning_rate, gpu, validation_interval, save_interval):
+@click.option('--debug', type=click.INT, default=0, help='Debug mode.')
+def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretrained_state, sequence_length, context_frames, use_state, model_type, num_masks, schedsamp_k, train_val_split, batch_size, learning_rate, gpu, validation_interval, save_interval, debug):
+    if debug == 1:
+        chainer.set_debug(True)
+
     """ Train the model based on the data saved in ../processed """
     logger = logging.getLogger(__name__)
     logger.info('Training the model')
@@ -673,16 +769,16 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
 
     print('Data set contain {0}, {1} will be use for training and {2} will be use for validation'.format(len(images)-1, train_val_split_index, len(images)-1-train_val_split_index))
 
-    # Enable GPU support if defined
-
     # Create the model    
     training_model = Model(
+        num_masks=num_masks,
         is_cdna=model_type == 'CDNA',
         is_dna=model_type == 'DNA',
         is_stp=model_type == 'STP',
         prefix='train'
     )
     validation_model = Model(
+        num_masks=num_masks,
         is_cdna=model_type == 'CDNA',
         is_dna=model_type == 'DNA',
         is_stp=model_type == 'STP',
@@ -693,7 +789,14 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
     optimizer = chainer.optimizers.Adam(alpha=learning_rate)
     optimizer.setup(training_model) 
 
+    # Load a previous model
+    if pretrained_model:
+        chainer.serializers.load_npz(pretrained_model, model)
+    if pretrained_state:
+        chainer.serializers.load_npz(pretrained_state, optimizer)
+
     # Training
+    # Enable GPU support if defined
     if gpu > -1:
         chainer.cuda.get_device_from_id(gpu).use()
         model.to_gpu()
@@ -716,8 +819,8 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
         grouped_set_validation.append(group)
 
     #train_iter = chainer.iterators.SerialIterator(grouped_set_training, batch_size)
-    train_iter = chainer.iterators.SerialIterator(grouped_set_training, batch_size, repeat=False, shuffle=False)
-    valid_iter = chainer.iterators.SerialIterator(grouped_set_validation, batch_size, repeat=False, shuffle=False)
+    train_iter = chainer.iterators.SerialIterator(grouped_set_training, batch_size, repeat=True, shuffle=True)
+    valid_iter = chainer.iterators.SerialIterator(grouped_set_validation, batch_size, repeat=False, shuffle=True)
 
     # Run training
     # As per Finn's implementation, one epoch is run on one batch size, randomly, but never more than once.
@@ -738,7 +841,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
         img_training_set, act_training_set, sta_training_set = concat_examples(batch)
 
         # Perform training
-        logger.info("Begining training for mini-batch {0}-{1}/{2} of epoch {3}".format(str(train_iter.current_position-batch_size), str(min(len(images_training), train_iter.current_position)), str(len(images_training)), str(itr+1)))
+        logger.info("Begining training for mini-batch {0}/{1} of epoch {2}".format(str(train_iter.current_position), str(len(images_training)), str(itr+1)))
         #loss = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
         optimizer.update(training_model, img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
         loss = training_model.loss
@@ -754,8 +857,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
         if train_iter.is_new_epoch and itr+1 % validation_interval == 0:
 
             for batch in valid_iter:
-                logger.info("Begining validation for mini-batch {0}-{1}/{2} of epoch {3}".format(str(min(0,valid_iter.current_position-batch_size)), str(min(len(images_validation), valid_iter.current_position)), str(len(images_validation)), str(itr+1)))
-                batch = np.array(batch)
+                logger.info("Begining validation for mini-batch {0}/{1} of epoch {2}".format(str(valid_iter.current_position), str(len(images_validation)), str(itr+1)))
                 img_validation_set, act_validation_set, sta_validation_set = concat_examples(batch)
                 
                 # Run through validation set
@@ -769,7 +871,8 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, sequence_
             
             valid_iter.reset()
 
-        if itr % save_interval == 0:
+        if train_iter.is_new_epoch and itr % save_interval == 0:
+        #if itr % save_interval == 0:
             logger.info('Saving model')
 
             save_dir = output_dir + '/' + model_suffix_dir

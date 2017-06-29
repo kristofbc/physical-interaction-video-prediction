@@ -1,4 +1,4 @@
-.PHONY: clean data lint requirements sync_data_to_s3 sync_data_from_s3 train visualization
+.PHONY: clean data lint requirements sync_data_to_s3 sync_data_from_s3 train visualization predict
 
 #################################################################################
 # GLOBALS                                                                       #
@@ -25,7 +25,7 @@ requirements: test_environment
 
 ## Make Dataset
 data: requirements
-	$(PYTHON_INTERPRETER) src/data/make_dataset.py
+	$(PYTHON_INTERPRETER) src/data/make_dataset.py ${ARGS}
 
 ## Delete all compiled Python files
 clean:
@@ -69,9 +69,13 @@ test_environment:
 train: 
 	python src/models/train_model.py ${ARGS}
 
+## Predict a time steps from a trained model
+predict:
+	python src/models/predict_model.py ${MODEL_DIR} ${MODEL_NAME} ${DATA_INDEX} ${ARGS}
+
 ## Create the visualization from the model: make visualization model_name
 visualization:
-	python src/visualization/visualize.py $(MODEL)
+	python src/visualization/visualize.py ${MODEL}
 
 
 #################################################################################
