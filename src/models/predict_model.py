@@ -126,7 +126,7 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
         img = np.rollaxis(img, 0, 3)
         new_image.paste(Image.fromarray(img, 'RGB'), (original_image_width*i, 0))
 
-    new_image.save(path + '/prediction-' + str(time_step) + '.png')
+    new_image.save(path + '/prediction-' + str(time_step) + '-' +  model_name + '.png')
 
     print(model)
 
