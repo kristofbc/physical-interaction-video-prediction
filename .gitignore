@@ -1,3 +1,7 @@
+# Project
+models
+.python-version
+
 # Vim swap
 *.swp
 *.swo

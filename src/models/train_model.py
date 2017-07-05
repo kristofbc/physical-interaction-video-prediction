@@ -712,8 +712,8 @@ class Model(chainer.Chain):
 @click.option('--batch_size', type=click.INT, default=32, help='Batch size for training.')
 @click.option('--learning_rate', type=click.FLOAT, default=0.001, help='The base learning rate of the generator.')
 @click.option('--gpu', type=click.INT, default=-1, help='ID of the gpu(s) to use')
-@click.option('--validation_interval', type=click.INT, default=200, help='How often to run a batch through the validation model')
-@click.option('--save_interval', type=click.INT, default=2000, help='How often to save a model checkpoint')
+@click.option('--validation_interval', type=click.INT, default=20, help='How often to run a batch through the validation model')
+@click.option('--save_interval', type=click.INT, default=1, help='How often to save a model checkpoint')
 @click.option('--debug', type=click.INT, default=0, help='Debug mode.')
 def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretrained_state, sequence_length, context_frames, use_state, model_type, num_masks, schedsamp_k, train_val_split, batch_size, learning_rate, gpu, validation_interval, save_interval, debug):
     if debug == 1:
@@ -891,7 +891,6 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
             logger.info(summ)
         for summ_valid in summaries_valid:
             logger.info(summ_valid)
-
     
 
 if __name__ == '__main__':
