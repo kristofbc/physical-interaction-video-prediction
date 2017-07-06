@@ -19,7 +19,8 @@ import glob
 
 import six.moves.cPickle as pickle
 
-from PIL import Image, ImageFont, ImageDraw, ImageEnhance
+from PIL import Image, ImageFont, ImageDraw, ImageEnhance, ImageChops
+import imageio
 
 
 # =================================================
@@ -42,8 +43,10 @@ from PIL import Image, ImageFont, ImageDraw, ImageEnhance
 @click.option('--image_width', type=click.INT, default=64, help='Width of one predicted frame.')
 @click.option('--original_image_height', type=click.INT, default=512, help='Height of one predicted frame.')
 @click.option('--original_image_width', type=click.INT, default=640, help='Width of one predicted frame.')
+@click.option('--downscale_factor', type=click.FLOAT, default=0.5, help='Downscale the image by this factor.')
 @click.option('--gpu', type=click.INT, default=-1, help='ID of the gpu to use')
-def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, model_type, schedsamp_k, context_frames, use_state, num_masks, image_height, image_width, original_image_height, original_image_width, gpu):
+@click.option('--gif', type=click.INT, default=1, help='Create a GIF of the predicted result.')
+def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, model_type, schedsamp_k, context_frames, use_state, num_masks, image_height, image_width, original_image_height, original_image_width, downscale_factor, gpu, gif):
     """ Predict the next {time_step} frame based on a trained {model} """
     logger = logging.getLogger(__name__)
     path = models_dir + '/' + model_dir
@@ -123,19 +126,29 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
     # First row is the time_step
     # Second row is the ground truth
     # Third row is the generated image
-    text_width_x = original_image_width
+    frame_width = int(original_image_width * downscale_factor)
+    frame_height = int(original_image_height * downscale_factor)
+    text_width_x = frame_width
     text_height_x = 50
-    text_width_y = original_image_height
+    text_width_y = frame_height
     text_height_y = 50
 
-    total_width = original_image_width * time_step + text_height_x
-    total_height = original_image_height * 2 + text_height_x
-    new_image = Image.new('RGB', (total_width, total_height))
+    total_width = frame_width * time_step + text_height_x
+    total_height = frame_height * 2 + text_height_x
+
+    if gif == 1:
+        total_width = total_width + frame_width
+
+    new_image = Image.new('RGBA', (total_width, total_height))
 
     # Text label x
     font_size = 18
     font = ImageFont.truetype('Arial', font_size)
     label = ["Time = {}".format(i+1) for i in xrange(time_step)]
+
+    if gif == 1:
+        label.append("Animated sequence")
+
     for i in xrange(len(label)):
         text = label[i]
         text_container_img = Image.new('RGB', (text_width_x, text_height_x), 'white')
@@ -157,17 +170,61 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
 
     # Original
     ground_truth_images_path = glob.glob(data_dir + '/' + data_map[data_index][5])
+    original_gif = []
     for i in xrange(min(time_step, len(ground_truth_images_path))):
         img = Image.open(ground_truth_images_path[i]).convert('RGB')
-        new_image.paste(img, (text_height_x + original_image_width*i, text_height_x))
+
+        if downscale_factor != 1:
+            img = img.resize((frame_width, frame_height), Image.ANTIALIAS)
+
+        new_image.paste(img, (text_height_x + frame_width*i, text_height_x))
+        #original_gif.append(np.array(img.getdata(), np.uint8).reshape(img.size[1], img.size[0], 3))
+        original_gif.append(img)
     
     # Prediction
+    predicted_gif = []
     for i in xrange(len(resize_predicted_images)):
         img = resize_predicted_images[i].data[0]
         img = np.rollaxis(img, 0, 3)
-        new_image.paste(Image.fromarray(img, 'RGB'), (text_height_x + original_image_width*i, original_image_height + text_height_x))
+        img = Image.fromarray(img, 'RGB')
 
-    new_image.save(path + '/prediction-' + str(time_step) + '-' +  model_name + '.png')
+        if downscale_factor != 1:
+            img = img.resize((frame_width, frame_height), Image.ANTIALIAS)
+
+        new_image.paste(img, (text_height_x + frame_width*i, frame_height + text_height_x))
+        #predicted_gif.append(np.array(img.getdata(), np.uint8).reshape(img.size[1], img.size[0], 3))
+        predicted_gif.append(img)
+
+    # If enabled, create a GIF from the sequence of original and predicted image
+    if gif == 1:
+        # Create a tmp file
+        temp_original_gif_path = path + '/original-' + str(time_step) + model_name + '.gif'
+        temp_predicted_gif_path = path + '/predicted-' + str(time_step) + model_name + '.gif'
+        #imageio.mimsave(temp_original_gif_path, original_gif)
+        #imageio.mimsave(temp_predicted_gif_path, predicted_gif)
+        #original_gif_img = Image.open(temp_original_gif_path)
+        #predicted_gif_img = Image.open(temp_predicted_gif_path)
+        # Import the tmp file and reshape each frame to the whole scene width/height
+        gif_frames = []
+        for img in original_gif:
+            reshaped_original_gif_img = Image.new('RGB', (total_width, total_height))
+            reshaped_original_gif_img.paste(img, (text_height_x + frame_width * time_step, text_height_x))
+            gif_frames.append(reshaped_original_gif_img)
+        for img in predicted_gif:
+            reshaped_predicted_gif_img = Image.new('RGB', (total_width, total_height))
+            reshaped_predicted_gif_img.paste(img, (text_height_x + frame_width * time_step, text_height_x + frame_height))
+            gif_frames.append(reshaped_predicted_gif_img)
+        # Avoid flickering when gif is done: add a still under the gif
+        new_image.paste(original_gif[0], (text_height_x + frame_width * time_step, text_height_x))
+        new_image.paste(predicted_gif[0], (text_height_x + frame_width * time_step, text_height_x + frame_height))
+        # Cleat the tmp files
+        #os.remove(temp_original_gif_path)
+        #os.remove(temp_predicted_gif_path)
+
+    if gif == 1:
+        new_image.save(path + '/prediction-' + str(time_step) + '-' +  model_name + '.gif', save_all=True, append_images=gif_frames, transparency=0)
+    else:
+        new_image.save(path + '/prediction-' + str(time_step) + '-' +  model_name + '.png')
 
     print(model)
 
