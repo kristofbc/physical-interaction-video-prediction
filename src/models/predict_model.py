@@ -15,8 +15,12 @@ import click
 import os
 import csv
 import logging
-from PIL import Image
+import glob
+
 import six.moves.cPickle as pickle
+
+from PIL import Image, ImageFont, ImageDraw, ImageEnhance
+
 
 # =================================================
 # Main entry point of the training processes (main)
@@ -116,15 +120,52 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
         resize_predicted_images.append(resize)
 
     # Print the images horizontally
-    total_width = original_image_width * time_step
-    total_height = original_image_height
+    # First row is the time_step
+    # Second row is the ground truth
+    # Third row is the generated image
+    text_width_x = original_image_width
+    text_height_x = 50
+    text_width_y = original_image_height
+    text_height_y = 50
+
+    total_width = original_image_width * time_step + text_height_x
+    total_height = original_image_height * 2 + text_height_x
     new_image = Image.new('RGB', (total_width, total_height))
+
+    # Text label x
+    font_size = 18
+    font = ImageFont.truetype('Arial', font_size)
+    label = ["Time = {}".format(i+1) for i in xrange(time_step)]
+    for i in xrange(len(label)):
+        text = label[i]
+        text_container_img = Image.new('RGB', (text_width_x, text_height_x), 'white')
+        text_container_draw = ImageDraw.Draw(text_container_img)
+        w, h = text_container_draw.textsize(text, font=font)
+        text_container_draw.text(((text_width_x-w)/2, (text_height_x-h)/2), text, fill='black', font=font)
+        new_image.paste(text_container_img, (text_height_x + text_width_x*i, 0))
+
+    # Text label y
+    label = ["Ground truth", "Prediction"]
+    for i in xrange(len(label)):
+        text = label[i]
+        text_container_img = Image.new('RGB', (text_width_y, text_height_y), 'white')
+        text_container_draw = ImageDraw.Draw(text_container_img)
+        w, h = text_container_draw.textsize(text, font=font)
+        text_container_draw.text(((text_width_y-w)/2, (text_height_y-h)/2), text, fill='black', font=font)
+        text_container_img = text_container_img.rotate(90, expand=1)
+        new_image.paste(text_container_img, (0, text_height_x + text_width_y * i))
+
+    # Original
+    ground_truth_images_path = glob.glob(data_dir + '/' + data_map[data_index][5])
+    for i in xrange(min(time_step, len(ground_truth_images_path))):
+        img = Image.open(ground_truth_images_path[i]).convert('RGB')
+        new_image.paste(img, (text_height_x + original_image_width*i, text_height_x))
     
-    ground_truth_images = resize_predicted_images
-    for i in xrange(len(ground_truth_images)):
-        img = ground_truth_images[i].data[0]
+    # Prediction
+    for i in xrange(len(resize_predicted_images)):
+        img = resize_predicted_images[i].data[0]
         img = np.rollaxis(img, 0, 3)
-        new_image.paste(Image.fromarray(img, 'RGB'), (original_image_width*i, 0))
+        new_image.paste(Image.fromarray(img, 'RGB'), (text_height_x + original_image_width*i, original_image_height + text_height_x))
 
     new_image.save(path + '/prediction-' + str(time_step) + '-' +  model_name + '.png')
 

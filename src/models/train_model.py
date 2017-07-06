@@ -107,36 +107,8 @@ def peak_signal_to_noise_ratio(true, pred):
         Returns:
             Peak signal to noise ratio (PSNR)
     """
-    return 10.0 * F.log(1.0 / mean_squared_error(true, pred)) / log(10.0)
+    return 10.0 * F.log(1.0 / F.mean_squared_error(true, pred)) / log(10.0)
 
-def mean_squared_error(true, pred):
-    """
-        L2 distance between tensors true and pred.
-
-        Args:
-            true: the ground truth image
-            pred: the predicted image
-        Returns:
-            Mean squared error between the ground truth and the predicted image
-    """
-    return F.sum(F.square(true - pred) / pred.size)
-
-def conv_2d(inputs, W=None, stride=1, pad=1):
-    """
-        Create a basic 2d convolution using Chainer's internal function
-        
-        Args:
-            inputs: input Tensor, 4D, batch x channels x height x width
-            W: input weight to apply in the convolution
-            stride: stride of filter application
-            pad: spatial padding width for inputs Tensor
-        Returns:
-            Output variable of shape (batch x channels x height x width)
-    """
-    if W is None:
-        W_initializer = initializers._get_initializer(None)
-        W = variable.Parameter(W_initializer)
-    return convolution_2d.convolution_2d(inputs, None, W, stride, pad)
 
 def broadcast_reshape(x, y, axis=0):
     """
@@ -254,10 +226,10 @@ class BasicConvLSTMCell(chainer.Chain):
         inputs_h = F.concat((inputs, h), axis=1)
 
         # Parameters of gates are concatenated into one conv for efficiency
-        i_j_f_o = L.Convolution2D(in_channels=inputs_h.shape[1], out_channels=4*num_channels, ksize=(filter_size, filter_size), pad=filter_size/2)(inputs_h)
+        j_i_f_o = L.Convolution2D(in_channels=inputs_h.shape[1], out_channels=4*num_channels, ksize=(filter_size, filter_size), pad=filter_size/2)(inputs_h)
 
         # i = input_gate, j = new_input, f = forget_gate, o = output_gate
-        j, i, f, o = F.split_axis(i_j_f_o, indices_or_sections=4, axis=1)
+        j, i, f, o = F.split_axis(j_i_f_o, indices_or_sections=4, axis=1)
 
         new_c = c * F.sigmoid(f + forget_bias) + F.sigmoid(i) * F.tanh(j)
         new_h = F.tanh(new_c) * F.sigmoid(o)
@@ -664,7 +636,7 @@ class Model(chainer.Chain):
         summaries = []
         for i, x, gx in zip(range(len(gen_images)), images[num_frame_before_prediction:], gen_images[num_frame_before_prediction - 1:]):
             x = variable.Variable(x)
-            recon_cost = mean_squared_error(x, gx)
+            recon_cost = F.mean_squared_error(x, gx)
             psnr_i = peak_signal_to_noise_ratio(x, gx)
             psnr_all += psnr_i
             summaries.append(self.prefix + '_recon_cost' + str(i) + ': ' + str(recon_cost.data))
@@ -674,7 +646,7 @@ class Model(chainer.Chain):
 
         for i, state, gen_state in zip(range(len(gen_states)), states[num_frame_before_prediction:], gen_states[num_frame_before_prediction - 1:]):
             state = variable.Variable(state)
-            state_cost = mean_squared_error(state, gen_state) * 1e-4
+            state_cost = F.mean_squared_error(state, gen_state) * 1e-4
             summaries.append(self.prefix + '_state_cost' + str(i) + ': ' + str(state_cost.data))
             loss += state_cost
         
