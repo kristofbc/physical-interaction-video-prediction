@@ -217,7 +217,7 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
         # Avoid flickering when gif is done: add a still under the gif
         new_image.paste(original_gif[0], (text_height_x + frame_width * time_step, text_height_x))
         new_image.paste(predicted_gif[0], (text_height_x + frame_width * time_step, text_height_x + frame_height))
-        # Cleat the tmp files
+        # Clean the tmp files
         #os.remove(temp_original_gif_path)
         #os.remove(temp_predicted_gif_path)
 

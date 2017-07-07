@@ -10,6 +10,7 @@ from math import floor, log
 import numpy as np
 
 import chainer
+from chainer import cuda
 from chainer import variable
 import chainer.functions as F
 import chainer.links as L
@@ -188,13 +189,17 @@ class LayerNormalizationConv2D(chainer.Chain):
 class BasicConvLSTMCell(chainer.Chain):
     """ Stateless convolutional LSTM, as seen in lstm_op.py from video_prediction model """
 
-    def __init__(self, in_size, out_size):
-        super(BasicConvLSTMCell, self).__init__()
+    def __init__(self, in_size, out_size, filter_size=5):
+        super(BasicConvLSTMCell, self).__init__(
+            # @TODO: maybe provide in channels because the concatenation
+            conv = L.Convolution2D(in_channels=in_size, out_channels=4*out_size, ksize=(filter_size, filter_size), pad=filter_size/2)
+        )
 
         self.in_size = in_size,
         self.out_size = out_size
+        self.filter_size = filter_size
 
-    def __call__(self, inputs, state, num_channels, filter_size=5, forget_bias=1.0):
+    def __call__(self, inputs, state, forget_bias=1.0):
         """Basic LSTM recurrent network cell, with 2D convolution connctions.
 
           We add forget_bias (default: 1) to the biases of the forget gate in order to
@@ -206,8 +211,6 @@ class BasicConvLSTMCell(chainer.Chain):
           Args:
             inputs: input Tensor, 4D, batch x channels x height x width
             state: state Tensor, 4D, batch x channels x height x width
-            num_channels: the number of output channels in the layer.
-            filter_size: the shape of the each convolution filter.
             forget_bias: the initial value of the forget biases.
 
           Returns:
@@ -216,9 +219,10 @@ class BasicConvLSTMCell(chainer.Chain):
         # In Tensorflow: batch x height x width x channels
         # In Chainer: batch x channel x height x width
         # Create a state based on Finn's implementation
+        xp = chainer.cuda.get_array_module(*inputs.data)
         if state is None:
-            state_size = (inputs.shape[0], 2*num_channels, inputs.shape[2], inputs.shape[3]) 
-            state = self.xp.zeros(state_size, dtype=inputs[0].data.dtype)
+            state_size = (inputs.shape[0], 2*self.out_size, inputs.shape[2], inputs.shape[3]) 
+            state = xp.zeros(state_size, dtype=inputs[0].data.dtype)
 
         c, h = F.split_axis(state, indices_or_sections=2, axis=1)
 
@@ -226,7 +230,8 @@ class BasicConvLSTMCell(chainer.Chain):
         inputs_h = F.concat((inputs, h), axis=1)
 
         # Parameters of gates are concatenated into one conv for efficiency
-        j_i_f_o = L.Convolution2D(in_channels=inputs_h.shape[1], out_channels=4*num_channels, ksize=(filter_size, filter_size), pad=filter_size/2)(inputs_h)
+        #j_i_f_o = L.Convolution2D(in_channels=inputs_h.shape[1], out_channels=4*num_channels, ksize=(filter_size, filter_size), pad=filter_size/2)(inputs_h)
+        j_i_f_o = self.conv(inputs_h)
 
         # i = input_gate, j = new_input, f = forget_gate, o = output_gate
         j, i, f, o = F.split_axis(j_i_f_o, indices_or_sections=4, axis=1)
@@ -459,13 +464,13 @@ class Model(chainer.Chain):
             enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=3/2),
             enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64,64), pad=3/2),
 
-            lstm1 = BasicConvLSTMCell(in_size=None, out_size=32),
-            lstm2 = BasicConvLSTMCell(in_size=None, out_size=32),
-            lstm3 = BasicConvLSTMCell(in_size=None, out_size=64),
-            lstm4 = BasicConvLSTMCell(in_size=None, out_size=64),
-            lstm5 = BasicConvLSTMCell(in_size=None, out_size=128),
-            lstm6 = BasicConvLSTMCell(in_size=None, out_size=64),
-            lstm7 = BasicConvLSTMCell(in_size=None, out_size=32),
+            lstm1 = BasicConvLSTMCell(in_size=64, out_size=32),
+            lstm2 = BasicConvLSTMCell(in_size=64, out_size=32),
+            lstm3 = BasicConvLSTMCell(in_size=96, out_size=64),
+            lstm4 = BasicConvLSTMCell(in_size=128, out_size=64),
+            lstm5 = BasicConvLSTMCell(in_size=192, out_size=128),
+            lstm6 = BasicConvLSTMCell(in_size=192, out_size=64),
+            lstm7 = BasicConvLSTMCell(in_size=128, out_size=32),
             
             norm_enc0 = LayerNormalizationConv2D(),
             norm_enc6 = LayerNormalizationConv2D(),
@@ -557,16 +562,16 @@ class Model(chainer.Chain):
             # TensorFlow code use layer_normalization for normalize on the output convolution
             enc0 = self.norm_enc0(enc0)
             
-            hidden1, lstm_state1 = self.lstm1(inputs=enc0, state=lstm_state1, num_channels=32)
+            hidden1, lstm_state1 = self.lstm1(inputs=enc0, state=lstm_state1)
             hidden1 = self.hidden1(hidden1)
-            hidden2, lstm_state2 = self.lstm2(inputs=hidden1, state=lstm_state2, num_channels=32)
+            hidden2, lstm_state2 = self.lstm2(inputs=hidden1, state=lstm_state2)
             hidden2 = self.hidden2(hidden2)
             enc1 = self.enc1(hidden2)
             enc1 = F.relu(enc1)
 
-            hidden3, lstm_state3 = self.lstm3(inputs=enc1, state=lstm_state3, num_channels=64)
+            hidden3, lstm_state3 = self.lstm3(inputs=enc1, state=lstm_state3)
             hidden3 = self.hidden3(hidden3)
-            hidden4, lstm_state4 = self.lstm4(inputs=hidden3, state=lstm_state4, num_channels=64)
+            hidden4, lstm_state4 = self.lstm4(inputs=hidden3, state=lstm_state4)
             hidden4 = self.hidden4(hidden4)
             enc2 = self.enc2(hidden4)
             enc2 = F.relu(enc2)
@@ -580,13 +585,13 @@ class Model(chainer.Chain):
             enc3 = self.enc3(enc2)
             enc3 = F.relu(enc3)
  
-            hidden5, lstm_state5 = self.lstm5(inputs=enc3, state=lstm_state5, num_channels=128)
+            hidden5, lstm_state5 = self.lstm5(inputs=enc3, state=lstm_state5)
             hidden5 = self.hidden5(hidden5)
             # ** Had to add outsize + pad!
             enc4 = self.enc4(hidden5)
             enc4 = F.relu(enc4)
 
-            hidden6, lstm_state6 = self.lstm6(inputs=enc4, state=lstm_state6, num_channels=64)
+            hidden6, lstm_state6 = self.lstm6(inputs=enc4, state=lstm_state6)
             hidden6 = self.hidden6(hidden6)
             # Skip connection
             hidden6 = F.concat((hidden6, enc1), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
@@ -594,7 +599,7 @@ class Model(chainer.Chain):
             # ** Had to add outsize + pad!
             enc5 = self.enc5(hidden6)
             enc5 = F.relu(enc5)
-            hidden7, lstm_state7 = self.lstm7(inputs=enc5, state=lstm_state7, num_channels=32)
+            hidden7, lstm_state7 = self.lstm7(inputs=enc5, state=lstm_state7)
             hidden7 = self.hidden7(hidden7)
             # Skip connection
             hidden7 = F.concat((hidden7, enc0), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
@@ -763,15 +768,20 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
 
     # Load a previous model
     if pretrained_model:
-        chainer.serializers.load_npz(pretrained_model, model)
+        chainer.serializers.load_npz(pretrained_model, training_model)
+        logger.info("Loading pretrained model {}".format(pretrained_model))
     if pretrained_state:
-        chainer.serializers.load_npz(pretrained_state, optimizer)
+        chainer.serializers.load_npz(pretrained_state, training_model)
+        logger.info("Loading pretrained state {}".format(pretrained_state))
 
     # Training
     # Enable GPU support if defined
     if gpu > -1:
         chainer.cuda.get_device_from_id(gpu).use()
-        model.to_gpu()
+        training_model.to_gpu()
+        xp = chainer.cuda.cupy
+    else:
+        xp = np
 
     # Create the batches for Chainer's implementation of the iterator
     # Group the images, actions and states
@@ -815,7 +825,8 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         # Perform training
         logger.info("Begining training for mini-batch {0}/{1} of epoch {2}".format(str(train_iter.current_position), str(len(images_training)), str(itr+1)))
         #loss = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-        optimizer.update(training_model, img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+        optimizer.update(training_model, xp.asarray(img_training_set), xp.asarray(act_training_set), xp.asarray(sta_training_set), itr, schedsamp_k, use_state, num_masks, context_frames)
+
         loss = training_model.loss
         psnr_all = training_model.psnr_all
         summaries = training_model.summaries
@@ -834,7 +845,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
                 
                 # Run through validation set
                 #loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-                loss_valid = training_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+                loss_valid = training_model(xp.asarray(img_validation_set), xp.asarray(act_validation_set), xp.asarray(sta_validation_set), itr, schedsamp_k, use_state, num_masks, context_frames)
                 psnr_all_valid = training_model.psnr_all
                 summaries_valid = training_model.summaries
 
@@ -868,6 +879,5 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
 if __name__ == '__main__':
     log_fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     #logging.basicConfig(level=logging.INFO, format=log_fmt, stream=sys.stdout)
-    logging.basicConfig(level=logging.INFO, format=log_fmt)
-
+    logging.basicConfig(level=logging.INFO, format=log_fmt) 
     main()
