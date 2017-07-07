@@ -72,19 +72,26 @@ def scheduled_sample(ground_truth_x, generated_x, batch_size, num_ground_truth):
         Returns:
             New batch with num_ground_truth samples from ground_truth_x and the rest from generated_x
     """
+    xp = chainer.cuda.get_array_module(generated_x.data)
+    ground_truth_x = chainer.cuda.to_cpu(ground_truth_x)
+    generated_x = chainer.cuda.to_cpu(generated_x.data)
+
     idx = np.arange(int(batch_size))
-    np.random.shuffle(idx)
     ground_truth_idx = np.array(np.take(idx, np.arange(num_ground_truth)))
     generated_idx = np.array(np.take(idx, np.arange(num_ground_truth, int(batch_size))))
 
     reshaped_ground_truth_x = F.reshape(ground_truth_x, (int(batch_size), -1))
     reshaped_genetated_x = F.reshape(generated_x, (int(batch_size), -1))
+
     ground_truth_examps = np.take(reshaped_ground_truth_x.data, ground_truth_idx, axis=0)
     generated_examps = np.take(reshaped_genetated_x.data, generated_idx, axis=0)
 
     index_a = np.vstack((ground_truth_idx, np.zeros_like(ground_truth_idx)))
     index_b = np.vstack((generated_idx, np.ones_like(generated_idx)))
-    order = np.hstack((index_a, index_b))[:, np.argsort(np.hstack((ground_truth_idx, generated_idx)))]
+    ground_truth_generated_stacked = np.hstack((ground_truth_idx, generated_idx))
+    ground_truth_generated_stacked_sorted = np.argsort(ground_truth_generated_stacked)
+    order = np.hstack((index_a, index_b))[:, ground_truth_generated_stacked_sorted]
+
     stitched = []
     for i in xrange(len(order[0])):
         if order[1][i] == 0:
@@ -95,8 +102,9 @@ def scheduled_sample(ground_truth_x, generated_x, batch_size, num_ground_truth):
             pos = np.where(generated_idx == i)
             stitched.append(generated_examps[pos])
             continue
+    stitched = np.array(stitched, dtype=np.float32)
     stitched = np.reshape(stitched, (ground_truth_x.shape[0], ground_truth_x.shape[1], ground_truth_x.shape[2], ground_truth_x.shape[3]))
-    return stitched
+    return xp.array(stitched)
 
 def peak_signal_to_noise_ratio(true, pred):
     """
