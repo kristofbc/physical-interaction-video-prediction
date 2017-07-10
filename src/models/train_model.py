@@ -284,6 +284,9 @@ class StatelessCDNA(chainer.Chain):
         enc0, enc1, enc2, enc3, enc4, enc5, enc6 = encs
         hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
 
+        img_height = prev_image.shape[2]
+        img_width = prev_image.shape[3]
+
         # CDNA specific
         enc7 = self.enc7(enc6)
         enc7 = F.relu(enc7)
@@ -296,9 +299,11 @@ class StatelessCDNA(chainer.Chain):
         
         # Reshape and normalize
         #cdna_kerns = F.reshape(cdna_kerns, (batch_size, 1, 5, 5, num_masks))
-        cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), self.num_masks, 1, DNA_KERN_SIZE, DNA_KERN_SIZE))
+        #cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), self.num_masks, 1, DNA_KERN_SIZE, DNA_KERN_SIZE))
+        cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), 1, self.num_masks, DNA_KERN_SIZE, DNA_KERN_SIZE))
         cdna_kerns = F.relu(cdna_kerns - RELU_SHIFT) + RELU_SHIFT
-        norm_factor = F.sum(cdna_kerns, (2, 3, 4), keepdims=True)
+        #norm_factor = F.sum(cdna_kerns, (2, 3, 4), keepdims=True)
+        norm_factor = F.sum(cdna_kerns, (1, 3, 4), keepdims=True)
 
         # The norm factor is broadcasted to match the shape difference
         axis_reshape = 0
@@ -307,24 +312,27 @@ class StatelessCDNA(chainer.Chain):
         norm_factor = F.reshape(norm_factor, norm_factor_new_shape)
         norm_factor_broadcasted = F.broadcast_to(norm_factor, cdna_kerns.shape)
         cdna_kerns = cdna_kerns / norm_factor_broadcasted
+	
+        # Treat the color channel dimension as the batch dimension since the same
+        # transformation is applied to each color channel.
+        # Treat the batch dimension as the channel dimension so that
+        # F.depthwise_convolution_2d can apply a different transformation to each sample.
+        cdna_kerns = F.transpose(cdna_kerns, (1, 0, 2, 3, 4))
+        cdna_kerns = F.reshape(cdna_kerns, (num_masks, int(batch_size), DNA_KERN_SIZE, DNA_KERN_SIZE))
+        # Swap the batch and channel dimension to match the kernel
+        prev_image = F.transpose(prev_image, (1, 0, 2, 3))
 
-        cdna_kerns = F.tile(cdna_kerns, (1,1,3,1,1))
-        cdna_kerns = F.split_axis(cdna_kerns, indices_or_sections=batch_size, axis=0)
-        prev_images = F.split_axis(prev_image, indices_or_sections=batch_size, axis=0)
+        # Transform the image
+        tmp_transformed = F.depthwise_convolution_2d(prev_image, cdna_kerns, stride=(1, 1), pad=cdna_kerns.shape[2]/2)
 
-        # Transform image
-        tmp_transformed = []
-        for kernel, preimg in zip(cdna_kerns, prev_images):
-            kernel = F.squeeze(kernel)
-            if len(kernel.shape) == 3:
-                kernel = kernel[..., np.keepdims]
-            if len(preimg.shape) ==3:
-                preimg = F.expand_dims(preimg, axis=0)
-            conv = F.depthwise_convolution_2d(preimg, kernel, stride=(1, 1), pad=kernel.shape[2]/2)
-            tmp_transformed.append(conv)
-        tmp_transformed = F.concat(tmp_transformed, axis=0)
-        tmp_transformed = F.split_axis(tmp_transformed, indices_or_sections=self.num_masks, axis=1) # Previously axis=3 but our channels are on axis=1 ? ok!
-        transformed = transformed + list(tmp_transformed)
+        # Transpose the dimension to where they belong
+        tmp_transformed = F.reshape(tmp_transformed, (color_channels, int(batch_size), self.num_masks, img_height, img_width))
+        tmp_transformed = F.transpose(tmp_transformed, (1, 0, 2, 3, 4))
+        tmp_transformed = F.split_axis(tmp_transformed, indices_or_sections=self.num_masks, axis=2)
+        transformed = []
+        for t in xrange(len(tmp_transformed)):
+            trans = F.squeeze(tmp_transformed[t], axis=2)
+            transformed.append(trans)
 
         return transformed
 
@@ -497,6 +505,10 @@ class Model(chainer.Chain):
         self.num_masks = num_masks
         self.prefix = prefix
 
+        self.loss = 0.0
+        self.psnr_all = 0.0
+        self.summaries = []
+
         model = None
         if is_cdna:
             model = StatelessCDNA(num_masks)
@@ -508,6 +520,15 @@ class Model(chainer.Chain):
             raise ValueError("No network specified")
         else:
             self.add_link('model', model)
+
+    def reset_state(self):
+        """
+            Reset the gradient of this model, but also the specific model
+        """
+        self.loss = 0.0
+        self.psnr_all = 0.0
+        self.summaries = []
+
 
     def __call__(self, images, actions=None, states=None, iter_num=-1.0, scheduled_sampling_k=-1, use_state=True, num_masks=10, num_frame_before_prediction=2):
         """
@@ -698,7 +719,7 @@ class Model(chainer.Chain):
 @click.option('--learning_rate', type=click.FLOAT, default=0.001, help='The base learning rate of the generator.')
 @click.option('--gpu', type=click.INT, default=-1, help='ID of the gpu(s) to use')
 @click.option('--validation_interval', type=click.INT, default=20, help='How often to run a batch through the validation model')
-@click.option('--save_interval', type=click.INT, default=1, help='How often to save a model checkpoint')
+@click.option('--save_interval', type=click.INT, default=10, help='How often to save a model checkpoint')
 @click.option('--debug', type=click.INT, default=0, help='Debug mode.')
 def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretrained_state, sequence_length, context_frames, use_state, model_type, num_masks, schedsamp_k, train_val_split, batch_size, learning_rate, gpu, validation_interval, save_interval, debug):
     if debug == 1:
@@ -833,14 +854,14 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         # Perform training
         logger.info("Begining training for mini-batch {0}/{1} of epoch {2}".format(str(train_iter.current_position), str(len(images_training)), str(itr+1)))
         #loss = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-        optimizer.update(training_model, xp.asarray(img_training_set), xp.asarray(act_training_set), xp.asarray(sta_training_set), itr, schedsamp_k, use_state, num_masks, context_frames)
-
+        optimizer.update(training_model, img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
         loss = training_model.loss
         psnr_all = training_model.psnr_all
         summaries = training_model.summaries
 
         global_losses.append(loss.data)
         global_psnr_all.append(psnr_all.data)
+        training_model.reset_state()
 
         logger.info("{0} {1}".format(str(itr+1), str(loss.data)))
         loss_valid, psnr_all_valid, summaries_valid = None, None, []
@@ -853,7 +874,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
                 
                 # Run through validation set
                 #loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-                loss_valid = training_model(xp.asarray(img_validation_set), xp.asarray(act_validation_set), xp.asarray(sta_validation_set), itr, schedsamp_k, use_state, num_masks, context_frames)
+                loss_valid = training_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
                 psnr_all_valid = training_model.psnr_all
                 summaries_valid = training_model.summaries
 
@@ -861,6 +882,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
                 global_psnr_all_valid.append(psnr_all_valid.data)
             
             valid_iter.reset()
+            training_model.reset_state()
 
         if train_iter.is_new_epoch and itr % save_interval == 0:
         #if itr % save_interval == 0:
