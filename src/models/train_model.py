@@ -854,7 +854,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         # Perform training
         logger.info("Begining training for mini-batch {0}/{1} of epoch {2}".format(str(train_iter.current_position), str(len(images_training)), str(itr+1)))
         #loss = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-        optimizer.update(training_model, img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+        optimizer.update(training_model, xp.array(img_training_set), xp.array(act_training_set), xp.array(sta_training_set), itr, schedsamp_k, use_state, num_masks, context_frames)
         loss = training_model.loss
         psnr_all = training_model.psnr_all
         summaries = training_model.summaries
@@ -874,7 +874,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
                 
                 # Run through validation set
                 #loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-                loss_valid = training_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+                loss_valid = training_model(xp.array(img_validation_set), xp.array(act_validation_set), xp.array(sta_validation_set), itr, schedsamp_k, use_state, num_masks, context_frames)
                 psnr_all_valid = training_model.psnr_all
                 summaries_valid = training_model.summaries
 
