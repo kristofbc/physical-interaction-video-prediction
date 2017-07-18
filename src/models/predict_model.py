@@ -99,7 +99,7 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
     logger.info("Model imported successfully")
 
     if gpu >= 0:
-        cuda.get_device(args.gpu).use()
+        cuda.get_device(gpu).use()
         model.to_gpu()
 
     # Resize the image to fit the trained dimension
@@ -110,7 +110,7 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
         resize_img_pred.append(resize.data)
     resize_img_pred = np.asarray(resize_img_pred, dtype=np.float32)
 
-    # Predit the new images
+    # Predict the new images
     loss = model(resize_img_pred, act_pred, sta_pred, 0, schedsamp_k, use_state, num_masks, context_frames)
     predicted_images = model.gen_images
 

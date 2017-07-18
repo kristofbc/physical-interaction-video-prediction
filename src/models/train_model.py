@@ -859,8 +859,11 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         psnr_all = training_model.psnr_all
         summaries = training_model.summaries
 
-        global_losses.append(loss.data)
-        global_psnr_all.append(psnr_all.data)
+        loss_data_cpu = chainer.cuda.to_cpu(loss.data)
+        psnr_data_cpu = chainer.cuda.to_cpu(psnr_all.data)
+
+        global_losses.append(loss_data_cpu)
+        global_psnr_all.append(psnr_data_cpu)
         training_model.reset_state()
 
         logger.info("{0} {1}".format(str(itr+1), str(loss.data)))
