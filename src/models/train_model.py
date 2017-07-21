@@ -695,7 +695,7 @@ class Model(chainer.Chain):
 @click.option('--data_dir', type=click.Path(exists=True), default='data/processed/brain-robotics-data/push/push_train', help='Directory containing data.')
 @click.option('--output_dir', type=click.Path(), default='models', help='Directory for model checkpoints.')
 @click.option('--event_log_dir', type=click.Path(), default='models', help='Directory for writing summary.')
-@click.option('--epoch', type=click.INT, default=100000, help='Number of training iterations.')
+@click.option('--epoch', type=click.INT, default=3125, help='Number of training epochs: 100 000/batch_size.')
 @click.option('--pretrained_model', type=click.Path(), default='', help='Filepath of a pretrained model to initialize from.')
 @click.option('--pretrained_state', type=click.Path(), default='', help='Filepath of a pretrained state to initialize from.')
 @click.option('--sequence_length', type=click.INT, default=10, help='Sequence length, including context frames.')
@@ -826,11 +826,17 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
     # Run training
     # As per Finn's implementation, one epoch is run on one batch size, randomly, but never more than once.
     # At the end of the queue, if the epochs len is not reach, the queue is generated again. 
+    local_losses = []
+    local_psnr_all = []
+    local_losses_valid = []
+    local_psnr_all_valid = []
+
     global_losses = []
     global_psnr_all = []
     global_losses_valid = []
     global_psnr_all_valid = []
 
+    summaries, summaries_valid = [], []
     training_queue = []
     validation_queue = []
     fill_length_training = batch_size - (len(images_training) % batch_size)
@@ -852,12 +858,20 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         loss_data_cpu = chainer.cuda.to_cpu(loss.data)
         psnr_data_cpu = chainer.cuda.to_cpu(psnr_all.data)
 
-        global_losses.append(loss_data_cpu)
-        global_psnr_all.append(psnr_data_cpu)
+        local_losses.append(loss_data_cpu)
+        local_psnr_all.append(psnr_data_cpu)
         training_model.reset_state()
 
         logger.info("{0} {1}".format(str(itr+1), str(loss.data)))
-        loss_valid, psnr_all_valid, summaries_valid = None, None, []
+        loss, psnr_all, loss_data_cpu, psnr_data_cpu = None, None, None, None
+
+        if train_iter.is_new_epoch:
+            local_losses = np.array(local_losses)
+            local_psnr_all = np.array(local_psnr_all)
+            global_losses.append([local_losses.mean(), local_losses.std(), local_losses.min(), local_losses.max(), np.median(local_losses)])
+            global_psnr_all.append([local_psnr_all.mean(), local_psnr_all.std(), local_psnr_all.min(), local_psnr_all.max(), np.median(local_psnr_all)])
+
+            local_losses, local_psnr_all = [], []
 
         if train_iter.is_new_epoch and itr+1 % validation_interval == 0:
 
@@ -871,8 +885,21 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
                 psnr_all_valid = training_model.psnr_all
                 summaries_valid = training_model.summaries
 
-                global_losses_valid.append(loss_valid.data)
-                global_psnr_all_valid.append(psnr_all_valid.data)
+                loss_valid_data_cpu = chainer.cuda.to_cpu(loss_valid.data)
+                psnr_all_valid_data_cpu = chainer.cuda.to_cpu(psnr_all_valid.data)
+
+                local_losses_valid.append(loss_valid_data_cpu)
+                local_psnr_all_valid.append(psnr_all_valid_data_cpu)
+                training_model.reset_state()
+
+                loss_valid, psnr_all_valid, loss_valid_data_cpu, psnr_all_valid_data_cpu = None, None, None, None
+
+            local_losses_valid = np.array(local_losses_valid)
+            local_psnr_all_valid = np.array(local_psnr_all_valid)
+            global_losses_valid.append([local_losses_valid.mean(), local_losses_valid.std(), local_losses_valid.min(), local_losses_valid.max(), np.median(local_losses_valid)])
+            global_psnr_all_valid.append([local_psnr_all_valid.mean(), local_psnr_all_valid.std(), local_psnr_all_valid.min(), local_psnr_all_valid.max(), np.median(local_psnr_all_valid)])
+
+            local_losses_valid, local_psnr_all_valid = [], []
             
             valid_iter.reset()
             training_model.reset_state()
@@ -895,8 +922,10 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
 
         for summ in summaries:
             logger.info(summ)
+        summaries = []
         for summ_valid in summaries_valid:
             logger.info(summ_valid)
+        summaries_valid = []
     
 
 if __name__ == '__main__':

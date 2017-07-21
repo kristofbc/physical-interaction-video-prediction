@@ -41,9 +41,9 @@ def main(model, model_dir, output_dir):
     training_global_losses = np.load(model_path + '/training-global_losses.npy')
     training_global_losses_valid = np.load(model_path + '/training-global_losses.npy')
 
-    graph = plot(training_global_losses, 'Epoch', 'Mean', 'Training global losses', lambda pos, i: [i, pos] if pos != 0 else [] )
+    graph = plot(training_global_losses, 'Epoch', 'Mean', 'Training global losses', lambda pos, i: [i, pos[0]] if pos[0] != 0 else [] )
     graph.savefig(visualization_path + '/training_global_losses')
-    graph = plot(training_global_losses, 'Epoch', 'Mean', 'Training global losses valid', lambda pos, i: [i, pos] if pos != 0 else [] )
+    graph = plot(training_global_losses, 'Epoch', 'Mean', 'Training global losses valid', lambda pos, i: [i, pos[0]] if pos[0] != 0 else [] )
     graph.savefig(visualization_path + '/training_global_losses_valid')
 
 
