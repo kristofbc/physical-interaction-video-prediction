@@ -296,43 +296,31 @@ class StatelessCDNA(chainer.Chain):
         # Predict kernels using linear function of last layer
         cdna_input = F.reshape(hidden5, (int(batch_size), -1))
         cdna_kerns = self.cdna_kerns(cdna_input)
-        
-        # Reshape and normalize
-        #cdna_kerns = F.reshape(cdna_kerns, (batch_size, 1, 5, 5, num_masks))
-        #cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), self.num_masks, 1, DNA_KERN_SIZE, DNA_KERN_SIZE))
-        cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), 1, self.num_masks, DNA_KERN_SIZE, DNA_KERN_SIZE))
-        cdna_kerns = F.relu(cdna_kerns - RELU_SHIFT) + RELU_SHIFT
-        #norm_factor = F.sum(cdna_kerns, (2, 3, 4), keepdims=True)
-        norm_factor = F.sum(cdna_kerns, (1, 3, 4), keepdims=True)
 
-        # The norm factor is broadcasted to match the shape difference
-        axis_reshape = 0
-        norm_factor_new_shape = tuple([1] * axis_reshape + list(norm_factor.shape) +
-                                       [1] * (len(cdna_kerns.shape) - axis_reshape - len(norm_factor.shape)))
-        norm_factor = F.reshape(norm_factor, norm_factor_new_shape)
-        norm_factor_broadcasted = F.broadcast_to(norm_factor, cdna_kerns.shape)
-        cdna_kerns = cdna_kerns / norm_factor_broadcasted
-	
+        # Reshape and normalize
+        # B x C x H x W => B x NUM_MASKS x 1 x H x W
+        cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), self.num_masks, 1, DNA_KERN_SIZE, DNA_KERN_SIZE))
+        cdna_kerns = F.relu(cdna_kerns - RELU_SHIFT) + RELU_SHIFT
+        norm_factor = F.sum(cdna_kerns, (2, 3, 4), keepdims=True)
+        cdna_kerns = broadcasted_division(cdna_kerns, norm_factor)
+
         # Treat the color channel dimension as the batch dimension since the same
         # transformation is applied to each color channel.
         # Treat the batch dimension as the channel dimension so that
         # F.depthwise_convolution_2d can apply a different transformation to each sample.
-        cdna_kerns = F.transpose(cdna_kerns, (1, 0, 2, 3, 4))
-        cdna_kerns = F.reshape(cdna_kerns, (num_masks, int(batch_size), DNA_KERN_SIZE, DNA_KERN_SIZE))
-        # Swap the batch and channel dimension to match the kernel
+        cdna_kerns = F.reshape(cdna_kerns, (int(batch_size), self.num_masks, DNA_KERN_SIZE, DNA_KERN_SIZE))
+        cdna_kerns = F.transpose(cdna_kerns, (1, 0, 2, 3))
+        # Swap the batch and channel dimension.
         prev_image = F.transpose(prev_image, (1, 0, 2, 3))
 
-        # Transform the image
-        tmp_transformed = F.depthwise_convolution_2d(prev_image, cdna_kerns, stride=(1, 1), pad=cdna_kerns.shape[2]/2)
-
-        # Transpose the dimension to where they belong
-        tmp_transformed = F.reshape(tmp_transformed, (color_channels, int(batch_size), self.num_masks, img_height, img_width))
-        tmp_transformed = F.transpose(tmp_transformed, (1, 0, 2, 3, 4))
-        tmp_transformed = F.split_axis(tmp_transformed, indices_or_sections=self.num_masks, axis=2)
-        transformed = []
-        for t in xrange(len(tmp_transformed)):
-            trans = F.squeeze(tmp_transformed[t], axis=2)
-            transformed.append(trans)
+        # Transform the image.
+        transformed = F.depthwise_convolution_2d(prev_image, cdna_kerns, stride=(1, 1), pad=DNA_KERN_SIZE/2)
+        
+        # Transpose the dimensions where they belong.
+        transformed = F.reshape(transformed, (color_channels, int(batch_size), self.num_masks, img_height, img_width))
+        transformed = F.transpose(transformed, (2, 1, 0, 3, 4))
+        transformed = F.split_axis(transformed, indices_or_sections=self.num_masks, axis=0)
+        transformed = [F.squeeze(t, axis=0) for t in transformed]
 
         return transformed
 
@@ -381,7 +369,7 @@ class StatelessDNA(chainer.Chain):
         prev_image_pad = F.pad(prev_image, pad_width=[[0,0], [0,0], [2,2], [2,2]], mode='constant', constant_values=0)
         kernel_inputs = []
         for xkern in range(DNA_KERN_SIZE):
-            for ykern in range(DNA):
+            for ykern in range(DNA_KERN_SIZE):
                 #tmp = F.get_item(prev_image_pad, [prev_image_pad.shape[0], prev_image_pad.shape[0], xkern:img_height, ykern:img_width])
                 tmp = F.get_item(prev_image_pad, list([slice(0,prev_image_pad.shape[0]), slice(0,prev_image_pad.shape[1]), slice(xkern,img_height), slice(ykern,img_width)]))
                 # ** Added this operation to make sure the size was still the original one!
@@ -407,11 +395,11 @@ class StatelessSTP(chainer.Chain):
         * Because the STP does not keep states, it should be passed as a parameter if one wants to continue learning from previous states
     """
     
-    def __init__(self):
+    def __init__(self, num_masks):
         super(StatelessSTP, self).__init__(
             enc7 = L.Deconvolution2D(in_channels=64, out_channels=3, ksize=(1,1), stride=1),
             stp_input = L.Linear(in_size=None, out_size=100),
-            params = L.Linear(in_size=None, out_size=6)
+            identity_params = L.Linear(in_size=None, out_size=6)
         )
 
     def __call__(self, lstm_states, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
@@ -440,13 +428,15 @@ class StatelessSTP(chainer.Chain):
 
         stp_input0 = F.reshape(hidden5, (int(batch_size), -1))
         stp_input1 = self.stp_input(stp_input0)
+        stp_input1 = F.relu(stp_input1)
         identity_params = np.array([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
         identity_params = np.repeat(identity_params, int(batch_size), axis=0)
         identity_params = variable.Variable(identity_params)
 
         stp_transformations = []
         for i in range(num_masks-1):
-            params = self.params(stp_input1) + identity_params
+            params = self.identity_params(stp_input1)
+            params = params + identity_params
             params = F.reshape(params, (int(params.shape[0]), 2, 3))
             grid = F.spatial_transformer_grid(params, (prev_image.shape[2], prev_image.shape[3]))
             trans = F.spatial_transformer_sampler(prev_image, grid)
