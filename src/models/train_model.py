@@ -151,7 +151,8 @@ def broadcasted_division(x, y, axis=0):
     return x / y_t
 
 def broadcast_scale(x, y, axis=0):
-    """ Apply a multiplicatation x*y where y is broadcasted to x to be able to complete the operation
+    """ 
+        Apply a multiplication x*y where y is broadcasted to x to be able to complete the operation
 
         Args:
             x: left hand operation
@@ -163,6 +164,22 @@ def broadcast_scale(x, y, axis=0):
     y_t = broadcast_reshape(x, y, axis)
     return x*y_t
 
+def smear_state_action(state_action, batch_size):
+    """
+        Smear the state and action with the inputs
+
+        Args:
+            state_action: the state and action, concatenated
+            batch_size: batch_size of the inputs
+        Returns:
+            (function)
+    """
+    def cb(inputs):
+        smear = F.reshape(state_action, (int(batch_size), int(state_action.shape[1]), 1, 1))
+        smear = F.tile(smear, (1, 1, int(inputs.shape[2]), int(inputs.shape[3])))
+        outputs = F.concat((inputs, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
+        return outputs
+    return cb
 
 # =============
 # Chains (chns)
@@ -616,16 +633,16 @@ class Model(chainer.Chain):
             enc0 = self.norm_enc0(enc0)
             enc0 = F.relu(enc0)
             
-            hidden1 = self.lstm1(inputs=enc0)
+            hidden1 = self.lstm1(enc0)
             hidden1 = self.hidden1(hidden1)
-            hidden2 = self.lstm2(inputs=hidden1)
+            hidden2 = self.lstm2(hidden1)
             hidden2 = self.hidden2(hidden2)
             enc1 = self.enc1(hidden2)
             enc1 = F.relu(enc1)
 
-            hidden3 = self.lstm3(inputs=enc1)
+            hidden3 = self.lstm3(enc1)
             hidden3 = self.hidden3(hidden3)
-            hidden4 = self.lstm4(inputs=hidden3)
+            hidden4 = self.lstm4(hidden3)
             hidden4 = self.hidden4(hidden4)
             enc2 = self.enc2(hidden4)
             enc2 = F.relu(enc2)
@@ -637,14 +654,15 @@ class Model(chainer.Chain):
                 enc2 = F.concat((enc2, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
             enc3 = self.enc3(enc2)
             enc3 = F.relu(enc3)
+            
  
-            hidden5 = self.lstm5(inputs=enc3)
+            hidden5 = self.lstm5(enc3)
             hidden5 = self.hidden5(hidden5)
             # ** Had to add outsize + pad!
             enc4 = self.enc4(hidden5)
             enc4 = F.relu(enc4)
 
-            hidden6 = self.lstm6(inputs=enc4)
+            hidden6 = self.lstm6(enc4)
             hidden6 = self.hidden6(hidden6)
             # Skip connection
             hidden6 = F.concat((hidden6, enc1), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
@@ -652,7 +670,7 @@ class Model(chainer.Chain):
             # ** Had to add outsize + pad!
             enc5 = self.enc5(hidden6)
             enc5 = F.relu(enc5)
-            hidden7 = self.lstm7(inputs=enc5)
+            hidden7 = self.lstm7(enc5)
             hidden7 = self.hidden7(hidden7)
             # Skip connection
             hidden7 = F.concat((hidden7, enc0), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
@@ -907,12 +925,12 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
 
             for batch in valid_iter:
                 logger.info("Begining validation for mini-batch {0}/{1} of epoch {2}".format(str(valid_iter.current_position), str(len(images_validation)), str(itr+1)))
-                #img_validation_set, act_validation_set, sta_validation_set = concat_examples(batch)
-                x_validation = concat_examples(batch)
+                img_validation_set, act_validation_set, sta_validation_set = concat_examples(batch)
+                #x_validation = concat_examples(batch)
                 
                 # Run through validation set
                 #loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-                loss_valid = training_model(xp.array(x_validation), itr)
+                loss_valid = training_model([xp.array(img_validation_set), xp.array(xp.act_validation_set), xp.array(sta_validation_set)], itr)
                 psnr_all_valid = training_model.psnr_all
                 summaries_valid = training_model.summaries
 
