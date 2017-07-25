@@ -92,6 +92,9 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
         is_cdna=model_type == 'CDNA',
         is_dna=model_type == 'DNA',
         is_stp=model_type == 'STP',
+        use_state=use_state,
+        scheduled_sampling_k=schedsamp_k,
+        num_frame_before_prediction=context_frames,
         prefix='predict'
     )
 
@@ -111,7 +114,7 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
     resize_img_pred = np.asarray(resize_img_pred, dtype=np.float32)
 
     # Predict the new images
-    loss = model(resize_img_pred, act_pred, sta_pred, 0, schedsamp_k, use_state, num_masks, context_frames)
+    loss = model([resize_img_pred, act_pred, sta_pred], 0)
     predicted_images = model.gen_images
 
     # Resize the predicted image
