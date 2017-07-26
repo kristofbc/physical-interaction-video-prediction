@@ -22,6 +22,32 @@ import six.moves.cPickle as pickle
 from PIL import Image, ImageFont, ImageDraw, ImageEnhance, ImageChops
 import imageio
 
+# ========================
+# Helpers functions (hlpr)
+# ========================
+
+def get_data_info(data_dir, data_index):
+    data_map = []
+    with open(data_dir + '/map.csv', 'rb') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            data_map.append(row)
+
+    if len(data_map) <= 1: # empty or only header
+        raise ValueError("No file map found")
+
+    # Get the requested data to test
+    data_index = int(data_index)+1
+    if data_index > len(data_map)-1:
+        raise ValueError("Data index {} is out of range for available data".format(data_index))
+
+    image = np.float32(np.load(data_dir + '/' + data_map[data_index][2]))
+    image_pred = np.float32(np.load(data_dir + '/' + data_map[data_index][6]))
+    image_bitmap_pred = data_map[data_index][5]
+    action = np.float32(np.load(data_dir + '/' + data_map[data_index][3]))
+    state = np.float32(np.load(data_dir + '/' + data_map[data_index][4]))
+
+    return image, image_pred, image_bitmap_pred, action, state
 
 # =================================================
 # Main entry point of the training processes (main)
@@ -55,26 +81,8 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
     if not os.path.exists(data_dir):
         raise ValueError("Directory {} does not exists".format(data_dir))
 
-    # Get the CSV data map
-    data_map = []
-    with open(data_dir + '/map.csv', 'rb') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            data_map.append(row)
-
-    if len(data_map) <= 1: # empty or only header
-        raise ValueError("No file map found")
-
-    # Get the requested data to test
-    data_index = int(data_index)+1
-    if data_index > len(data_map)-1:
-        raise ValueError("Data index {} is out of range for available data".format(data_index))
-
     logger.info("Loading data {}".format(data_index))
-    image = np.float32(np.load(data_dir + '/' + data_map[data_index][2]))
-    image_pred = np.float32(np.load(data_dir + '/' + data_map[data_index][6]))
-    action = np.float32(np.load(data_dir + '/' + data_map[data_index][3]))
-    state = np.float32(np.load(data_dir + '/' + data_map[data_index][4]))
+    image, image_pred, image_bitmap_pred, action, state = get_data_info(data_dir, data_index)
 
     img_pred, act_pred, sta_pred = concat_examples([[image_pred, action, state]])
 
@@ -172,7 +180,7 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
         new_image.paste(text_container_img, (0, text_height_x + text_width_y * i))
 
     # Original
-    ground_truth_images_path = glob.glob(data_dir + '/' + data_map[data_index][5])
+    ground_truth_images_path = glob.glob(data_dir + '/' + image_bitmap_pred)
     original_gif = []
     for i in xrange(min(time_step, len(ground_truth_images_path))):
         img = Image.open(ground_truth_images_path[i]).convert('RGB')

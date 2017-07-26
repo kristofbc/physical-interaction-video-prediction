@@ -4,9 +4,22 @@ import glob
 import csv
 import click
 import logging
+import math
 
 import numpy as np
 import matplotlib.pyplot as plt
+
+import chainer
+import chainer.functions as F
+
+from PIL import Image
+
+# Put the main path in the systems path
+sys.path.append("/".join(sys.path[0].split("/")[:-2]))
+
+from src.models.train_model import Model
+from src.models.train_model import concat_examples
+from src.models.predict_model import get_data_info
 
 # ========================
 # Helpers functions (hlpr)
@@ -136,11 +149,61 @@ def plot(ctx, xaxis, yaxis, title, cb):
     plt.plot(xcoord, ycoord)
     return plt
 
+def visualize_layer_activation(model, x, layer_idx):
+    logger = logging.getLogger(__name__)
+
+    activations = model.activations(layer_idx, x, 0)
+
+    # Rescale the activation [0, 255]
+    activations -= activations.min()
+    activations /= activations.max()
+    activations *= 255
+    activations = activations.astype(np.uint8)
+
+    # Plot the bitmap of the masks
+    filters = activations.shape[1]
+    plt.figure(1, figsize=(activations.shape[3]*filters,activations.shape[2]*filters))
+    n_column = math.floor(math.sqrt(filters))
+    n_row = math.ceil(filters / n_column) + 1
+    for i in xrange(filters):
+        plt.subplot(n_row, n_column, i+1)
+        plt.title("Filter:" + str(i))
+        plt.imshow(activations[0,i,:,:], interpolation="nearest", cmap="gray")
+
+    return plt
+    #images = []
+    #for i, activation in enumerate(activations):
+    #    print(activation[0])
+    #    exit()
+    #    #file_name = visualization_path + "/" + model + "-feature-map-{0}-{1}-iteration-{2}".format(layer_idx, i, iteration_number) + ".png"
+    #    image = np.rollaxis(activation, 0, 3) # c, h, w => h, w, c
+    #    print(image)
+    #    exit()
+    #    image = Image.fromarray(image)
+    #    images.append(image)
+    #    #image.save(file_name)
+    #return images
+
+
 @click.command()
 @click.argument('model', type=click.STRING)
+@click.option('--layer_idx', type=click.INT, default=0, help='Convolution layer index.')
+@click.option('--model_name', type=click.STRING, default=None, help='Name of the model to visualize.')
+@click.option('--data_index', type=click.INT, default=None, help='Index of the data for the visualization.')
 @click.option('--model_dir', type=click.Path(exists=True), default='models', help='Directory containing data.')
 @click.option('--output_dir', type=click.Path(), default='reports', help='Directory for model checkpoints.')
-def main(model, model_dir, output_dir):
+@click.option('--data_dir', type=click.Path(exists=True), default='data/processed/brain-robotics-data/push/push_testnovel', help='Directory containing data.')
+@click.option('--time_step', type=click.INT, default=8, help='Number of time steps to predict.')
+@click.option('--model_type', type=click.STRING, default='', help='Type of the trained model.')
+@click.option('--schedsamp_k', type=click.FLOAT, default=900.0, help='The k parameter for schedules sampling. -1 for no scheduled sampling.')
+@click.option('--context_frames', type=click.INT, default=2, help='Number of frames before predictions.')
+@click.option('--use_state', type=click.INT, default=1, help='Whether or not to give the state+action to the model.')
+@click.option('--num_masks', type=click.INT, default=10, help='Number of masks, usually 1 for DNA, 10 for CDNA, STP.')
+@click.option('--image_height', type=click.INT, default=64, help='Height of one predicted frame.')
+@click.option('--image_width', type=click.INT, default=64, help='Width of one predicted frame.')
+def main(model, layer_idx, model_name, data_index, model_dir, output_dir, data_dir, time_step, model_type, schedsamp_k, context_frames, use_state, num_masks, image_height, image_width):
+    logger = logging.getLogger(__name__)
+
     model_path = model_dir + '/' + model
     visualization_path = output_dir + '/' + model
     if not os.path.exists(model_path):
@@ -151,8 +214,7 @@ def main(model, model_dir, output_dir):
 
     # @TODO Need to be dynamic reporting
     training_global_losses = None
-    if os.path.exists(model_path + '/training-global_losses.npy'):
-        training_global_losses = np.load(model_path + '/training-global_losses.npy')
+    if os.path.exists(model_path + '/training-global_losses.npy'): training_global_losses = np.load(model_path + '/training-global_losses.npy')
 
     training_global_losses_valid = None
     if os.path.exists(model_path + '/training-global_losses_valid.npy'):
@@ -165,6 +227,7 @@ def main(model, model_dir, output_dir):
 
     # @TODO: fix the training loss
     #plt_inst = plot_losses_curves(training_global_losses if training_global_losses is not None else [], training_global_losses_valid if training_global_losses_valid is not None else [])
+    logger.info("Plotting the loss curves")
     plt_inst = plot_losses_curves(training_global_losses if training_global_losses is not None else [], [])
     iteration_number = len(training_global_losses) if len(training_global_losses) > 0 else len(training_global_losses_valid)
     plt_inst.savefig(visualization_path + "/" + model + "-iteration-{}".format(iteration_number) + ".png")
@@ -172,7 +235,46 @@ def main(model, model_dir, output_dir):
     plt_inst.savefig(visualization_path + "/" + model + "-validation-iteration-{}".format(iteration_number) + ".png")
 
     # Plot the masks activation
-    
+    if model_name is not None:
+        if not os.path.exists(model_path + '/' + model_name):
+            raise ValueError("Model name {} does not exists".format(model_name))
+
+        logger.info("Loading data {}".format(data_index))
+        image, image_pred, image_bitmap_pred, action, state = get_data_info(data_dir, data_index)
+        img_pred, act_pred, sta_pred = concat_examples([[image_pred, action, state]])
+
+        # Extract the information about the model
+        if model_type == '':
+            split_name = model.split("-")
+            if len(split_name) != 4:
+                raise ValueError("Model {} is not recognized, use --model_type to describe the type".format(model))
+            model_type = split_name[2]
+
+        # Load the model for prediction
+        logger.info("Importing model {0}/{1} of type {2}".format(model_dir, model, model_type))
+        model = Model(
+            num_masks=num_masks,
+            is_cdna=model_type == 'CDNA',
+            is_dna=model_type == 'DNA',
+            is_stp=model_type == 'STP',
+            use_state=use_state,
+            scheduled_sampling_k=schedsamp_k,
+            num_frame_before_prediction=context_frames,
+            prefix='predict'
+        )
+
+        chainer.serializers.load_npz(model_path + '/' + model_name, model)
+        logger.info("Model imported successfully")
+        
+        logger.info("Predicting input for the activation map")
+        resize_img_pred = []
+        for i in xrange(len(img_pred)):
+            resize = F.resize_images(img_pred[i], (image_height, image_width))
+            resize = F.cast(resize, np.float32) / 255.0
+            resize_img_pred.append(resize.data)
+        resize_img_pred = np.asarray(resize_img_pred, dtype=np.float32)
+        plt_inst = visualize_layer_activation(model, [resize_img_pred, act_pred, sta_pred], layer_idx)
+        plt_inst.show()
 
 
 

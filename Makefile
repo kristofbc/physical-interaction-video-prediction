@@ -75,7 +75,7 @@ predict:
 
 ## Create the visualization from the model: make visualization model_name
 visualization:
-	python src/visualization/visualize.py ${MODEL}
+	python src/visualization/visualize.py ${MODEL} ${ARGS}
 
 
 #################################################################################

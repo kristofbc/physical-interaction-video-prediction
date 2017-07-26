@@ -344,7 +344,7 @@ class StatelessCDNA(chainer.Chain):
         transformed = F.split_axis(transformed, indices_or_sections=self.num_masks, axis=0)
         transformed = [F.squeeze(t, axis=0) for t in transformed]
 
-        return transformed
+        return transformed, enc7
 
 
 class StatelessDNA(chainer.Chain):
@@ -408,7 +408,7 @@ class StatelessDNA(chainer.Chain):
         kernel_normalized = F.sum(kernel_normalized, axis=1, keepdims=False)
         transformed = [kernel_normalized]
 
-        return transformed
+        return transformed, enc7
 
 class StatelessSTP(chainer.Chain):
     """
@@ -461,7 +461,7 @@ class StatelessSTP(chainer.Chain):
             trans = F.spatial_transformer_sampler(prev_image, grid)
             stp_transformations.append(trans)
 
-        return stp_transformations
+        return stp_transformations, enc7
 
 
 class Model(chainer.Chain):
@@ -523,6 +523,7 @@ class Model(chainer.Chain):
         self.loss = 0.0
         self.psnr_all = 0.0
         self.summaries = []
+        self.conv_res = []
 
         model = None
         if is_cdna:
@@ -543,6 +544,7 @@ class Model(chainer.Chain):
         self.loss = 0.0
         self.psnr_all = 0.0
         self.summaries = []
+        self.conv_res = []
         self.lstm1.reset_state()
         self.lstm2.reset_state()
         self.lstm3.reset_state()
@@ -552,12 +554,12 @@ class Model(chainer.Chain):
         self.lstm7.reset_state()
 
 
-    def activations(self, layer_name, x, iter_num=-1.0):
+    def activations(self, layer_idx, x, iter_num=-1.0):
         """
             Return the filter activations for a convolution layer_name
 
             Args:
-                layer_name: name of the layer for the activation filter
+                layer_idx: index of the conv/deconv layer
                 x: an array containing an array of:
                     images: an array of Tensor of shape batch x channels x height x width
                     actions: an array of Tensor of shape batch x action
@@ -566,9 +568,35 @@ class Model(chainer.Chain):
             Returns:
                 loss, all the peak signal to noise ratio, summaries
         """
-        print("activation")
+        # Execute the normal prediction, then fetch the convolutions
+        self(x, iter_num)
+        conv_res = [conv.data for conv in self.conv_res]
+
+        if layer_idx > len(conv_res):
+            raise ValueError("Conv/deconv layer index is out of range: {0} > {1}".format(layer_idx, len(conv_res)))
+
+        channels = conv_res[layer_idx].shape[1]
+        activations_maps = []
+
+        #xp = chainer.cuda.get_array_module(conv_res[layer_idx].data)
+        xp = np
+        for i in xrange(channels):
+            enc = conv_res[layer_idx].copy()
+
+            # Keep one feature map
+            cond = xp.zeros_like(enc)
+            cond[0][i] = 1
+            #enc = chainer.Variable(xp.where(cond, enc, xp.zeros_like(enc)))
+            enc = chainer.Variable(enc)
+            
+            # Upsample the masks to the original size
+            #for i in reversed(range(layer_idx+1)):
 
 
+            activations_maps.append(enc.data)
+
+        return xp.concatenate(activations_maps)
+            
 
 
     def __call__(self, x, iter_num=-1.0):
@@ -681,7 +709,7 @@ class Model(chainer.Chain):
             enc6 = F.relu(enc6)
 
             # Specific model transformations
-            transformed = self.model(
+            transformed, enc7 = self.model(
                 [enc0, enc1, enc2, enc3, enc4, enc5, enc6],
                 [hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7],
                 batch_size, prev_image, self.num_masks, int(color_channels)
@@ -705,6 +733,7 @@ class Model(chainer.Chain):
             gen_states.append(current_state)
 
         # End of transformations
+        self.conv_res = [enc1, enc2, enc3, enc4, enc5, enc6, enc7]
 
         # L2 loss, PSNR for eval
         loss, psnr_all = 0.0, 0.0
