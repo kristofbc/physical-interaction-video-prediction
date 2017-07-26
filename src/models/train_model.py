@@ -4,6 +4,7 @@
 # Implementation in Chainer of https://github.com/tensorflow/models/tree/master/video_prediction
 # ==============================================================================================
 
+import types
 import random
 import math
 from math import floor, log
@@ -525,6 +526,56 @@ class Model(chainer.Chain):
         self.summaries = []
         self.conv_res = []
 
+        # Condition ops callback
+        def ops_smear(use_state):
+            def ops(args):
+                x = args.get("x")
+                if use_state:
+                    state_action = args.get("state_action")
+                    batch_size = args.get("batch_size")
+
+                    smear = F.reshape(state_action, (int(batch_size), int(state_action.shape[1]), 1, 1))
+                    smear = F.tile(smear, (1, 1, int(x.shape[2]), int(x.shape[3])))
+                    x = F.concat((x, smear), axis=1) # Previously axis=3 but our channel is on axis=1? ok
+                return x
+            return ops
+        
+        def ops_skip_connection(enc_idx):
+            def ops(args):
+                x = args.get("x")
+                enc = args.get("encs")[enc_idx]
+                # Skip connection (current input + target enc)
+                x = F.concat((x, enc), axis=1) # Previously axis=3 but our channel is on axis=1? ok!
+                return x
+            return ops
+
+        def ops_save(name):
+            def ops(args):
+                x = args.get("x")
+                save_map = args.get("map")
+                save_map[name] = x
+                return x
+            return ops
+
+        def ops_get(name):
+            def ops(args):
+                save_map = args.get("map")
+                return save_map[name]
+            return ops
+
+
+        # Create an executable array containing all the transformations
+        self.ops = [
+            #[self.enc0, self.norm_enc0],
+            [self.enc0, self.norm_enc0],
+            [self.lstm1, self.hidden1, ops_save("hidden1"), self.lstm2, self.hidden2, ops_save("hidden2"), self.enc1],
+            [self.lstm3, self.hidden3, ops_save("hidden3"), self.lstm4, self.hidden4, ops_save("hidden4"), self.enc2],
+            [ops_smear(use_state), self.enc3],
+            [self.lstm5, self.hidden5, ops_save("hidden5"), self.enc4],
+            [self.lstm6, self.hidden6, ops_save("hidden6"), ops_skip_connection(1), self.enc5],
+            [self.lstm7, self.hidden7, ops_save("hidden7"), ops_skip_connection(0), self.enc6, self.norm_enc6]
+        ]
+
         model = None
         if is_cdna:
             model = StatelessCDNA(num_masks)
@@ -656,66 +707,46 @@ class Model(chainer.Chain):
             # Predicted state is always fed back in
             state_action = F.concat((action, current_state), axis=1)
 
-            enc0 = self.enc0(prev_image)
-            # TensorFlow code use layer_normalization for normalize on the output convolution
-            enc0 = self.norm_enc0(enc0)
-            enc0 = F.relu(enc0)
-            
-            hidden1 = self.lstm1(enc0)
-            hidden1 = self.hidden1(hidden1)
-            hidden2 = self.lstm2(hidden1)
-            hidden2 = self.hidden2(hidden2)
-            enc1 = self.enc1(hidden2)
-            enc1 = F.relu(enc1)
+            """ Execute the ops array of transformations """
+            # If an ops has a name of "ops" it means it's a custom ops
+            encs = []
+            maps = {}
+            x = prev_image
+            for i in xrange(len(self.ops)):
+                for j in xrange(len(self.ops[i])):
+                    op = self.ops[i][j]
+                    if isinstance(op, types.FunctionType):
+                        # Only these values are use now in the ops callback
+                        x = op({
+                            "x": x, 
+                            "encs": encs, 
+                            "map": maps, 
+                            "state_action": state_action, 
+                            "batch_size": batch_size
+                        })
+                    else:
+                        x = op(x)
+                # ReLU at the end of each transformation
+                x = F.relu(x)
+                # At the end of j iteration = completed a enc transformation
+                encs.append(x)
 
-            hidden3 = self.lstm3(enc1)
-            hidden3 = self.hidden3(hidden3)
-            hidden4 = self.lstm4(hidden3)
-            hidden4 = self.hidden4(hidden4)
-            enc2 = self.enc2(hidden4)
-            enc2 = F.relu(enc2)
+            # Extract the variables
+            hiddens = [
+                maps.get("hidden1"), maps.get("hidden2"), maps.get("hidden3"), maps.get("hidden4"),
+                maps.get("hidden5"), maps.get("hidden6"), maps.get("hidden7")
+            ]
+            enc0, enc1, enc2, enc3, enc4, enc5, enc6 = encs
+            hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
 
-            if self.use_state:
-                # Pass in state and action
-                smear = F.reshape(state_action, (int(batch_size), int(state_action.shape[1]), 1, 1))
-                smear = F.tile(smear, (1, 1, int(enc2.shape[2]), int(enc2.shape[3])))
-                enc2 = F.concat((enc2, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
-            enc3 = self.enc3(enc2)
-            enc3 = F.relu(enc3)
-            
- 
-            hidden5 = self.lstm5(enc3)
-            hidden5 = self.hidden5(hidden5)
-            # ** Had to add outsize + pad!
-            enc4 = self.enc4(hidden5)
-            enc4 = F.relu(enc4)
-
-            hidden6 = self.lstm6(enc4)
-            hidden6 = self.hidden6(hidden6)
-            # Skip connection
-            hidden6 = F.concat((hidden6, enc1), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
-
-            # ** Had to add outsize + pad!
-            enc5 = self.enc5(hidden6)
-            enc5 = F.relu(enc5)
-            hidden7 = self.lstm7(enc5)
-            hidden7 = self.hidden7(hidden7)
-            # Skip connection
-            hidden7 = F.concat((hidden7, enc0), axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
-
-            # ** Had to add outsize + pad!
-            enc6 = self.enc6(hidden7)
-            enc6 = self.norm_enc6(enc6)
-            enc6 = F.relu(enc6)
-
-            # Specific model transformations
+            """ Specific model transformations """
             transformed, enc7 = self.model(
-                [enc0, enc1, enc2, enc3, enc4, enc5, enc6],
-                [hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7],
+                encs, hiddens,
                 batch_size, prev_image, self.num_masks, int(color_channels)
             )
+            encs.append(enc7)
 
-            # Masks
+            """ Masks """
             masks = self.masks(enc6)
             masks = F.relu(masks)
             masks = F.reshape(masks, (-1, self.num_masks + 1))
@@ -733,7 +764,7 @@ class Model(chainer.Chain):
             gen_states.append(current_state)
 
         # End of transformations
-        self.conv_res = [enc1, enc2, enc3, enc4, enc5, enc6, enc7]
+        self.conv_res = encs
 
         # L2 loss, PSNR for eval
         loss, psnr_all = 0.0, 0.0
