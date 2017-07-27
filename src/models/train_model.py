@@ -29,6 +29,8 @@ import csv
 import click
 import logging
 
+import matplotlib.pyplot as plt
+
 # Amount to use when lower bounding Variables
 RELU_SHIFT = 1e-12
 
@@ -164,23 +166,6 @@ def broadcast_scale(x, y, axis=0):
     """
     y_t = broadcast_reshape(x, y, axis)
     return x*y_t
-
-def smear_state_action(state_action, batch_size):
-    """
-        Smear the state and action with the inputs
-
-        Args:
-            state_action: the state and action, concatenated
-            batch_size: batch_size of the inputs
-        Returns:
-            (function)
-    """
-    def cb(inputs):
-        smear = F.reshape(state_action, (int(batch_size), int(state_action.shape[1]), 1, 1))
-        smear = F.tile(smear, (1, 1, int(inputs.shape[2]), int(inputs.shape[3])))
-        outputs = F.concat((inputs, smear), axis=1) # Previously axis=3 but out channel is on axis=1 ? ok!
-        return outputs
-    return cb
 
 # =============
 # Chains (chns)
@@ -566,7 +551,6 @@ class Model(chainer.Chain):
 
         # Create an executable array containing all the transformations
         self.ops = [
-            #[self.enc0, self.norm_enc0],
             [self.enc0, self.norm_enc0],
             [self.lstm1, self.hidden1, ops_save("hidden1"), self.lstm2, self.hidden2, ops_save("hidden2"), self.enc1],
             [self.lstm3, self.hidden3, ops_save("hidden3"), self.lstm4, self.hidden4, ops_save("hidden4"), self.enc2],
@@ -643,8 +627,31 @@ class Model(chainer.Chain):
             # Upsample the masks to the original size
             #for i in reversed(range(layer_idx+1)):
 
-
+            # Apply a deconvolution if the layer_idx correspond to a convolution (upsampling)
             activations_maps.append(enc.data)
+            try:
+                #if self.ops[layer_idx][-1].__class__.__name__ == "Convolution2D":
+                if layer_idx <= 3:
+                    conv = None
+                    for i in xrange(len(self.ops[layer_idx])):
+                        if self.ops[layer_idx][i].__class__.__name__ == "Convolution2D":
+                            conv = self.ops[layer_idx][i]
+                            break
+
+                    if conv is None:
+                        continue
+
+                    # Get the original configurations
+                    out_channels, in_channels, kh, kw = conv.W.data.shape
+
+                    # Deconv the convoluted res
+                    deconv = L.Deconvolution2D(out_channels, in_channels, (kh, kw), 
+                                               stride=conv.stride, pad=conv.pad, initialW=conv.W.data, nobias=True)
+                    enc = deconv(enc)
+            except:
+                pass
+
+            #activations_maps.append(enc.data)
 
         return xp.concatenate(activations_maps)
             

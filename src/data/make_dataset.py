@@ -11,6 +11,8 @@ import numpy as np
 from PIL import Image
 import csv
 
+from matplotlib import pyplot as plt
+
 @click.command()
 @click.option('--data_dir', type=click.Path(exists=True), default='data/raw/brain-robotics-data/push/push_train', help='Directory containing data.')
 @click.option('--out_dir', type=click.Path(), default='data/processed/brain-robotics-data/push/push_train', help='Output directory of the converted data.')
@@ -69,8 +71,8 @@ def main(data_dir, out_dir, sequence_length, image_original_width, image_origina
             image = tf.reshape(image, [1, crop_size, crop_size, image_original_channel])
             # To obtain the original image, with no filter applied to it, comment: reshape, resize_bicubic and cast
             #image = tf.reshape(image, tf.stack([crop_size, crop_size, image_original_channel]))
-            image = tf.image.resize_bicubic(image, [image_resize_height, image_resize_width])
-            image = tf.cast(image, tf.float32) / 255.0
+            #image = tf.image.resize_bicubic(image, [image_resize_height, image_resize_width])
+            #image = tf.cast(image, tf.float32) / 255.0
             image_seq.append(image)
 
             state = tf.reshape(features[state_name], shape=[1, state_action_dimension])
@@ -97,7 +99,23 @@ def main(data_dir, out_dir, sequence_length, image_original_width, image_origina
         csv_ref = []
         for j in xrange(len(files)):
             logger.info("Creating data from tsrecords {0}/{1}".format(j+1, len(files)))
-            raw, act, sta, pred = sess.run([image_seq, action_seq, state_seq, image_seq_raw])
+            imgs, act, sta, pred = sess.run([image_seq, action_seq, state_seq, image_seq_raw])
+
+            # Resize the image using PIL antialiasing method
+            raw = []
+            for k in xrange(len(imgs)):
+                tmp = Image.fromarray(imgs[k])
+                tmp = tmp.resize((image_resize_height, image_resize_width), Image.ANTIALIAS)
+                tmp = np.fromstring(tmp.tobytes(), dtype=np.uint8)
+                tmp = tmp.reshape((image_resize_height, image_resize_width, 3))
+                tmp = tmp.astype(np.float32) / 255.0
+                #plt.figure(1)
+                #plt.imshow(tmp)
+                #plt.show()
+                #exit()
+                raw.append(tmp)
+            raw = np.array(raw)
+
             ref = []
             ref.append(j)
 

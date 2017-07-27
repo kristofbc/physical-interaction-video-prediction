@@ -160,29 +160,31 @@ def visualize_layer_activation(model, x, layer_idx):
     activations *= 255
     activations = activations.astype(np.uint8)
 
-    # Plot the bitmap of the masks
-    filters = activations.shape[1]
-    plt.figure(1, figsize=(activations.shape[3]*filters,activations.shape[2]*filters))
-    n_column = math.floor(math.sqrt(filters))
-    n_row = math.ceil(filters / n_column) + 1
-    for i in xrange(filters):
-        plt.subplot(n_row, n_column, i+1)
-        plt.title("Filter:" + str(i))
-        plt.imshow(activations[0,i,:,:], interpolation="nearest", cmap="gray")
-
+    n, c, h, w = activations.shape
+    # Plot non-deconvolution image
+    rows = int(math.ceil(math.sqrt(c)))
+    cols = int(round(math.sqrt(c)))
+    plt.figure(1)
+    for i in xrange(c):
+        plt.subplot(rows, cols, i+1)
+        plt.imshow(activations[0,i,:,:])
     return plt
-    #images = []
-    #for i, activation in enumerate(activations):
-    #    print(activation[0])
-    #    exit()
-    #    #file_name = visualization_path + "/" + model + "-feature-map-{0}-{1}-iteration-{2}".format(layer_idx, i, iteration_number) + ".png"
-    #    image = np.rollaxis(activation, 0, 3) # c, h, w => h, w, c
-    #    print(image)
-    #    exit()
-    #    image = Image.fromarray(image)
-    #    images.append(image)
-    #    #image.save(file_name)
-    #return images
+
+
+    # Plot deconvolution image
+    rows = int(math.ceil(math.sqrt(n)))
+    cols = int(round(math.sqrt(n)))
+    dpi=100
+    scale=1
+
+    plt.figure(1)
+    fig, axes = plt.subplots(rows, cols, figsize=(w*cols/dpi*scale, h*rows/dpi*scale), dpi=dpi)
+    for i, ax in enumerate(axes.flat):
+        if i < n:
+            ax.imshow(activations[i].transpose((1, 2, 0)))
+    
+    plt.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0.1, hspace=0.1)
+    return plt
 
 
 @click.command()
@@ -273,7 +275,10 @@ def main(model, layer_idx, model_name, data_index, model_dir, output_dir, data_d
             resize = F.cast(resize, np.float32) / 255.0
             resize_img_pred.append(resize.data)
         resize_img_pred = np.asarray(resize_img_pred, dtype=np.float32)
-        plt_inst = visualize_layer_activation(model, [resize_img_pred, act_pred, sta_pred], layer_idx)
+
+        # Only one image to visualize the activation
+        plt.cla()
+        plt_inst = visualize_layer_activation(model, [resize_img_pred[0:3], act_pred[0:3], sta_pred[0:3]], layer_idx)
         plt_inst.show()
 
 
