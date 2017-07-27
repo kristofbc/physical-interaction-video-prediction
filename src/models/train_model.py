@@ -173,7 +173,7 @@ def broadcast_scale(x, y, axis=0):
 class LayerNormalizationConv2D(chainer.Chain):
     def __init__(self):
         super(LayerNormalizationConv2D, self).__init__(
-            norm = L.LayerNormalization()
+            #norm = L.LayerNormalization()
         )
     
     """
@@ -185,6 +185,7 @@ class LayerNormalizationConv2D(chainer.Chain):
             Output variable of shape (batch x channels x height x width)
     """
     def __call__(self, inputs):
+        return inputs
         batch_size, channels, height, width = inputs.shape[0:4]
         inputs = F.reshape(inputs, (batch_size, -1))
         inputs = self.norm(inputs)
@@ -473,7 +474,7 @@ class Model(chainer.Chain):
 	    enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2),
             enc1 = L.Convolution2D(in_channels=32, out_channels=32, ksize=(3,3), stride=2, pad=3/2),
             enc2 = L.Convolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, pad=3/2),
-            enc3 = L.Convolution2D(in_channels=74, out_channels=64, ksize=(1,1), stride=1, pad=1/2),
+            enc3 = L.Convolution2D(in_channels=74, out_channels=64, ksize=(1,1), stride=1),
             enc4 = L.Deconvolution2D(in_channels=128, out_channels=128, ksize=(3,3), stride=2, outsize=(16,16), pad=3/2),
             enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=3/2),
             enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64,64), pad=3/2),
@@ -621,14 +622,14 @@ class Model(chainer.Chain):
             # Keep one feature map
             cond = xp.zeros_like(enc)
             cond[0][i] = 1
-            #enc = chainer.Variable(xp.where(cond, enc, xp.zeros_like(enc)))
-            enc = chainer.Variable(enc)
+            enc = chainer.Variable(xp.where(cond, enc, xp.zeros_like(enc)))
+            #enc = chainer.Variable(enc)
             
             # Upsample the masks to the original size
             #for i in reversed(range(layer_idx+1)):
 
             # Apply a deconvolution if the layer_idx correspond to a convolution (upsampling)
-            activations_maps.append(enc.data)
+            #activations_maps.append(enc.data)
             try:
                 #if self.ops[layer_idx][-1].__class__.__name__ == "Convolution2D":
                 if layer_idx <= 3:
@@ -641,6 +642,9 @@ class Model(chainer.Chain):
                     if conv is None:
                         continue
 
+                    print(conv)
+                    exit()
+
                     # Get the original configurations
                     out_channels, in_channels, kh, kw = conv.W.data.shape
 
@@ -651,7 +655,7 @@ class Model(chainer.Chain):
             except:
                 pass
 
-            #activations_maps.append(enc.data)
+            activations_maps.append(enc.data)
 
         return xp.concatenate(activations_maps)
             

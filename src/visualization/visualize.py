@@ -7,10 +7,12 @@ import logging
 import math
 
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 
 import chainer
 import chainer.functions as F
+import chainer.links as L
 
 from PIL import Image
 
@@ -20,6 +22,150 @@ sys.path.append("/".join(sys.path[0].split("/")[:-2]))
 from src.models.train_model import Model
 from src.models.train_model import concat_examples
 from src.models.predict_model import get_data_info
+
+# ===============================
+# General Visualizer class (visc)
+# ===============================
+
+class Visualizer(object):
+    """
+        Visualize the components of a network
+    """
+    def __init__(self, network):
+        """
+            Args:
+                network (chainer.Link): The trained network to visualize
+        """
+        self._network = network
+        self._bitmap = {}
+
+    def _rescale(self, data):
+        """ 
+            Rescale the data [0, 255]
+
+            Args:
+                data (float[]): the data to rescale
+            Returns:
+                (int[])
+        """
+        data -= data.min()
+        data /= data.max()
+        data *= 255.0
+        return data.astype(np.uint8)
+
+    def _get_layer(self, layer_name):
+        """
+            Get the layer from the network
+
+            Args:
+                layer_name (string|chainer.link): name of the layer to visualize or 
+                    the layer itself to visualize
+        """
+        # Get the weight of the filter
+        if isinstance(layer_name, basestring):
+            return self._network[layer_name]
+        else:
+            return layer_name
+
+
+    def plot_filters(self, layer_name, **kwargs):
+        """
+            Plot the weigths of a layer
+
+            Args:
+                layer_name (string|chainer.link): name of the layer to visualize or 
+                    the layer itself to visualize
+            Returns:
+                (pyplot)
+        """
+        if not self._network[layer_name]:
+            raise ValueError("Layer {} does not exists in model")
+
+        # Get the weight of the filter
+        layer = self._get_layer(layer_name)
+
+        weights = None
+        try:
+            weights = layer.W.T
+        except:
+            weights = layer.W
+
+        bitmaps = [bitmap[0].data for bitmap in weights]
+        #bitmaps = np.rollaxis(weights.data, 1, 4)
+
+        # Plot the weigths
+        nrow = int(math.sqrt(len(bitmaps))) + 1
+        for i in xrange(len(bitmaps)):
+            ax = plt.subplot(nrow, nrow, i+1)
+            #ax.get_xaxis().set_visible(false)
+            #ax.get_yaxis().set_visible(false)
+            bitmap = bitmaps[i]
+            #bitmap = np.rollaxis(bitmaps[i], 0, 3)
+            plt.imshow(self._rescale(bitmap), **kwargs)
+        return plt
+
+    def plot_activation(self, layer_name, layer_transformation=None, **kwargs):
+        """
+            Plot the layer activation (after "activating" a layer with data, e.g: after training/prediction)
+            
+            Args:
+                layer_name (string|chainer.link): name of the layer to visualize or 
+                    the layer itself to visualize
+                layer_transformation (Function): apply a transformation to the layer before ploting it
+            Returns:
+                (pyplot)
+        """
+        layer = self._get_layer(layer_name)
+
+        if layer.data.shape[0] > 1:
+            raise ValueError("Can only plot the activation of 1 image not {}".format(layer.data.shape[0]))
+
+        data = None
+        if layer_transformation is not None:
+            data = layer_transformation(layer)
+        else:
+            data = layer.data
+
+        # Plot the activation
+        nrow = int(math.sqrt(data.shape[1])) + 1
+        for i in xrange(data.shape[1]):
+            bitmap = data[0][i]
+            fmax = np.max(bitmap)
+            fmin = np.min(bitmap)
+
+            diff = fmax - fmin if (fmax - fmin) > 0 else 1
+            bitmap = ((bitmap - fmin) * 0xff / diff).astype(np.uint8)
+            ax = plt.subplot(nrow, nrow, i+1)
+            #ax.get_xaxis().set_visible(false)
+            #ax.get_yaxis().set_visible(false)
+            plt.imshow(bitmap)
+        return plt
+
+    def plot_output(self, layer_name, **kwargs):
+        """
+            Plot the output at a particular layer
+
+            Args:
+                layer_name (string|chainer.link): name of the layer to visualize or 
+                    the layer itself to visualize
+            Returns:
+                (pyplot)
+        """
+        layer = self._get_layer(layer_name)
+        output = layer.data
+
+        # Plot the output
+        N = layer.shape[0] * layer.shape[1]
+        nrow = int(math.sqrt(N)) + 1
+        for i in xrange(len(output)):
+            for j in xrange(len(output[i])):
+                ax = plt.subplot(nrow, nrow, (i) * output.shape[1] + (j+1))
+                ax.set_title('Filter: {0}-{1}'.format(i,j), fontsize=10)
+                #ax.get_xaxis().set_visible(false)
+                #ax.get_yaxis().set_visible(false)
+                plt.imshow(output[i][j], **kwargs)
+        return plt
+
 
 # ========================
 # Helpers functions (hlpr)
@@ -162,13 +308,13 @@ def visualize_layer_activation(model, x, layer_idx):
 
     n, c, h, w = activations.shape
     # Plot non-deconvolution image
-    rows = int(math.ceil(math.sqrt(c)))
-    cols = int(round(math.sqrt(c)))
-    plt.figure(1)
-    for i in xrange(c):
-        plt.subplot(rows, cols, i+1)
-        plt.imshow(activations[0,i,:,:])
-    return plt
+    #rows = int(math.ceil(math.sqrt(c)))
+    #cols = int(round(math.sqrt(c)))
+    #plt.figure(1)
+    #for i in xrange(c):
+    #    plt.subplot(rows, cols, i+1)
+    #    plt.imshow(activations[0,i,:,:])
+    #return plt
 
 
     # Plot deconvolution image
@@ -278,6 +424,23 @@ def main(model, layer_idx, model_name, data_index, model_dir, output_dir, data_d
 
         # Only one image to visualize the activation
         plt.cla()
+
+        model([resize_img_pred[0:3], act_pred[0:3], sta_pred[0:3]], 0)
+        visualizer = Visualizer(model)
+
+        def deconv(conv):
+            def ops(x):
+                out_size, in_size, kh, kw = conv.W.data.shape
+                #x = L.Deconvolution2D(out_size, in_size, (kh, kw), stride=conv.stride, pad=conv.pad, outsize=(64, 64))(x)
+                x = chainer.functions.deconvolution_2d(x, conv.W.data, stride=conv.stride, pad=conv.pad, outsize=(64,64))
+                return np.rollaxis(x.data, 1, 4)
+            return ops
+
+
+        #plt_instance = visualizer.plot_activation(model.conv_res[0], deconv(model.enc0))
+        plt_instance = visualizer.plot_activation(model.conv_res[0])
+        plt_instance.show()
+        exit()
         plt_inst = visualize_layer_activation(model, [resize_img_pred[0:3], act_pred[0:3], sta_pred[0:3]], layer_idx)
         plt_inst.show()
 
