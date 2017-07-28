@@ -912,7 +912,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         logger.info("Begining training for mini-batch {0}/{1} of epoch {2}".format(str(train_iter.current_position), str(len(images_training)), str(itr+1)))
         #loss = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
         if start_time is None:
-            stat_time = time.time()
+            start_time = time.time()
 
         optimizer.update(training_model, [xp.array(img_training_set), xp.array(act_training_set), xp.array(sta_training_set)], itr)
         loss = training_model.loss
@@ -982,6 +982,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
             logger.info("[VALID] epoch psnr: {}".format(local_psnr_all_valid.mean()))
 
             local_losses_valid, local_psnr_all_valid = [], []
+            start_time, stop_time = None, None
             
             valid_iter.reset()
             training_model.reset_state()
