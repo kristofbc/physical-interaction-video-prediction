@@ -172,9 +172,11 @@ def broadcast_scale(x, y, axis=0):
 # =============
 class LayerNormalizationConv2D(chainer.Chain):
     def __init__(self):
-        super(LayerNormalizationConv2D, self).__init__(
-            #norm = L.LayerNormalization()
-        )
+        super(LayerNormalizationConv2D, self).__init__()
+
+        with self.init_scope():
+            self.norm = L.LayerNormalization()
+
     
     """
         Apply a "layer normalization" on the result of a convolution
@@ -185,7 +187,6 @@ class LayerNormalizationConv2D(chainer.Chain):
             Output variable of shape (batch x channels x height x width)
     """
     def __call__(self, inputs):
-        return inputs
         batch_size, channels, height, width = inputs.shape[0:4]
         inputs = F.reshape(inputs, (batch_size, -1))
         inputs = self.norm(inputs)
@@ -202,16 +203,16 @@ class BasicConvLSTMCell(chainer.Chain):
     """ Stateless convolutional LSTM, as seen in lstm_op.py from video_prediction model """
 
     def __init__(self, in_size, out_size, filter_size=5):
-        super(BasicConvLSTMCell, self).__init__(
+        super(BasicConvLSTMCell, self).__init__()
+
+        with self.init_scope():
             # @TODO: maybe provide in channels because the concatenation
-            conv = L.Convolution2D(in_channels=in_size, out_channels=4*out_size, ksize=(filter_size, filter_size), pad=filter_size/2)
-        )
+            self.conv = L.Convolution2D(in_channels=in_size, out_channels=4*out_size, ksize=(filter_size, filter_size), pad=filter_size/2)
 
         self.in_size = in_size,
         self.out_size = out_size
         self.filter_size = filter_size
-        self.c = None
-        self.h = None
+        self.reset_state()
 
     def reset_state(self):
         self.c = None
@@ -268,10 +269,11 @@ class StatelessCDNA(chainer.Chain):
     """
     
     def __init__(self, num_masks):
-        super(StatelessCDNA, self).__init__(
-            enc7 = L.Deconvolution2D(in_channels=64, out_channels=3, ksize=(1,1), stride=1),
-            cdna_kerns = L.Linear(in_size=None, out_size=DNA_KERN_SIZE * DNA_KERN_SIZE * num_masks)
-        )
+        super(StatelessCDNA, self).__init__()
+
+        with self.init_scope():
+            self.enc7 = L.Deconvolution2D(in_channels=64, out_channels=3, ksize=(1,1), stride=1)
+            self.cdna_kerns = L.Linear(in_size=None, out_size=DNA_KERN_SIZE * DNA_KERN_SIZE * num_masks)
 
         self.num_masks = num_masks
 
@@ -341,10 +343,11 @@ class StatelessDNA(chainer.Chain):
     """
     
     def __init__(self, num_masks):
-        super(StatelessDNA, self).__init__(
-            enc7 = L.Deconvolution2D(in_channels=64, out_channels=DNA_KERN_SIZE**2, ksize=(1,1), stride=1),
-            
-        )
+        super(StatelessDNA, self).__init__()
+
+        with self.init_scope():
+            self.enc7 = L.Deconvolution2D(in_channels=64, out_channels=DNA_KERN_SIZE**2, ksize=(1,1), stride=1)
+
         self.num_masks = num_masks
 
     def __call__(self, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
@@ -404,11 +407,13 @@ class StatelessSTP(chainer.Chain):
     """
     
     def __init__(self, num_masks):
-        super(StatelessSTP, self).__init__(
-            enc7 = L.Deconvolution2D(in_channels=64, out_channels=3, ksize=(1,1), stride=1),
-            stp_input = L.Linear(in_size=None, out_size=100),
-            identity_params = L.Linear(in_size=None, out_size=6)
-        )
+        super(StatelessSTP, self).__init__()
+
+        with self.init_scope():
+            self.enc7 = L.Deconvolution2D(in_channels=64, out_channels=3, ksize=(1,1), stride=1)
+            self.stp_input = L.Linear(in_size=None, out_size=100)
+            self.identity_params = L.Linear(in_size=None, out_size=6)
+
 
     def __call__(self, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
         """
@@ -470,37 +475,52 @@ class Model(chainer.Chain):
                 prefix: appended to the results to differentiate between training and validation
                 learning_rate: learning rate
         """
-        super(Model, self).__init__(
-	    enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2),
-            enc1 = L.Convolution2D(in_channels=32, out_channels=32, ksize=(3,3), stride=2, pad=3/2),
-            enc2 = L.Convolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, pad=3/2),
-            enc3 = L.Convolution2D(in_channels=74, out_channels=64, ksize=(1,1), stride=1),
-            enc4 = L.Deconvolution2D(in_channels=128, out_channels=128, ksize=(3,3), stride=2, outsize=(16,16), pad=3/2),
-            enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=3/2),
-            enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64,64), pad=3/2),
+        super(Model, self).__init__()
 
-            lstm1 = BasicConvLSTMCell(in_size=64, out_size=32),
-            lstm2 = BasicConvLSTMCell(in_size=64, out_size=32),
-            lstm3 = BasicConvLSTMCell(in_size=96, out_size=64),
-            lstm4 = BasicConvLSTMCell(in_size=128, out_size=64),
-            lstm5 = BasicConvLSTMCell(in_size=192, out_size=128),
-            lstm6 = BasicConvLSTMCell(in_size=192, out_size=64),
-            lstm7 = BasicConvLSTMCell(in_size=128, out_size=32),
+        with self.init_scope():
+	    self.enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)
+            self.enc1 = L.Convolution2D(in_channels=32, out_channels=32, ksize=(3,3), stride=2, pad=3/2)
+            self.enc2 = L.Convolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, pad=3/2)
+            self.enc3 = L.Convolution2D(in_channels=74, out_channels=64, ksize=(1,1), stride=1)
+            self.enc4 = L.Deconvolution2D(in_channels=128, out_channels=128, ksize=(3,3), stride=2, outsize=(16,16), pad=3/2)
+            self.enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=3/2)
+            self.enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64,64), pad=3/2)
+
+            self.lstm1 = BasicConvLSTMCell(in_size=64, out_size=32)
+            self.lstm2 = BasicConvLSTMCell(in_size=64, out_size=32)
+            self.lstm3 = BasicConvLSTMCell(in_size=96, out_size=64)
+            self.lstm4 = BasicConvLSTMCell(in_size=128, out_size=64)
+            self.lstm5 = BasicConvLSTMCell(in_size=192, out_size=128)
+            self.lstm6 = BasicConvLSTMCell(in_size=192, out_size=64)
+            self.lstm7 = BasicConvLSTMCell(in_size=128, out_size=32)
             
-            norm_enc0 = LayerNormalizationConv2D(),
-            norm_enc6 = LayerNormalizationConv2D(),
-            hidden1 = LayerNormalizationConv2D(),
-            hidden2 = LayerNormalizationConv2D(),
-            hidden3 = LayerNormalizationConv2D(),
-            hidden4 = LayerNormalizationConv2D(),
-            hidden5 = LayerNormalizationConv2D(),
-            hidden6 = LayerNormalizationConv2D(),
-            hidden7 = LayerNormalizationConv2D(),
+            self.norm_enc0 = LayerNormalizationConv2D()
+            self.norm_enc6 = LayerNormalizationConv2D()
+            self.hidden1 = LayerNormalizationConv2D()
+            self.hidden2 = LayerNormalizationConv2D()
+            self.hidden3 = LayerNormalizationConv2D()
+            self.hidden4 = LayerNormalizationConv2D()
+            self.hidden5 = LayerNormalizationConv2D()
+            self.hidden6 = LayerNormalizationConv2D()
+            self.hidden7 = LayerNormalizationConv2D()
 
-            masks = L.Deconvolution2D(in_channels=64, out_channels=num_masks+1, ksize=(1,1), stride=1),
+            self.masks = L.Deconvolution2D(in_channels=64, out_channels=num_masks+1, ksize=(1,1), stride=1)
 
-            current_state = L.Linear(in_size=None, out_size=5)
-	)
+            self.current_state = L.Linear(in_size=None, out_size=5)
+
+            model = None
+            if is_cdna:
+                model = StatelessCDNA(num_masks)
+            elif is_stp:
+                model = StatelessSTP(num_masks)
+            elif is_dna:
+                model = StatelessDNA(num_masks)
+
+            if model is None:
+                raise ValueError("No network specified")
+            else:
+                self.model = model
+
         self.num_masks = num_masks
         self.use_state = use_state
         self.scheduled_sampling_k = scheduled_sampling_k
@@ -561,18 +581,6 @@ class Model(chainer.Chain):
             [self.lstm7, self.hidden7, ops_save("hidden7"), ops_skip_connection(0), self.enc6, self.norm_enc6]
         ]
 
-        model = None
-        if is_cdna:
-            model = StatelessCDNA(num_masks)
-        elif is_stp:
-            model = StatelessSTP(num_masks)
-        elif is_dna:
-            model = StatelessDNA(num_masks)
-        if model is None:
-            raise ValueError("No network specified")
-        else:
-            self.add_link('model', model)
-
     def reset_state(self):
         """
             Reset the gradient of this model, but also the specific model
@@ -588,78 +596,6 @@ class Model(chainer.Chain):
         self.lstm5.reset_state()
         self.lstm6.reset_state()
         self.lstm7.reset_state()
-
-
-    def activations(self, layer_idx, x, iter_num=-1.0):
-        """
-            Return the filter activations for a convolution layer_name
-
-            Args:
-                layer_idx: index of the conv/deconv layer
-                x: an array containing an array of:
-                    images: an array of Tensor of shape batch x channels x height x width
-                    actions: an array of Tensor of shape batch x action
-                    states: an array of Tensor of shape batch x state
-                iter_num: iteration (epoch) index
-            Returns:
-                loss, all the peak signal to noise ratio, summaries
-        """
-        # Execute the normal prediction, then fetch the convolutions
-        self(x, iter_num)
-        conv_res = [conv.data for conv in self.conv_res]
-
-        if layer_idx > len(conv_res):
-            raise ValueError("Conv/deconv layer index is out of range: {0} > {1}".format(layer_idx, len(conv_res)))
-
-        channels = conv_res[layer_idx].shape[1]
-        activations_maps = []
-
-        #xp = chainer.cuda.get_array_module(conv_res[layer_idx].data)
-        xp = np
-        for i in xrange(channels):
-            enc = conv_res[layer_idx].copy()
-
-            # Keep one feature map
-            cond = xp.zeros_like(enc)
-            cond[0][i] = 1
-            enc = chainer.Variable(xp.where(cond, enc, xp.zeros_like(enc)))
-            #enc = chainer.Variable(enc)
-            
-            # Upsample the masks to the original size
-            #for i in reversed(range(layer_idx+1)):
-
-            # Apply a deconvolution if the layer_idx correspond to a convolution (upsampling)
-            #activations_maps.append(enc.data)
-            try:
-                #if self.ops[layer_idx][-1].__class__.__name__ == "Convolution2D":
-                if layer_idx <= 3:
-                    conv = None
-                    for i in xrange(len(self.ops[layer_idx])):
-                        if self.ops[layer_idx][i].__class__.__name__ == "Convolution2D":
-                            conv = self.ops[layer_idx][i]
-                            break
-
-                    if conv is None:
-                        continue
-
-                    print(conv)
-                    exit()
-
-                    # Get the original configurations
-                    out_channels, in_channels, kh, kw = conv.W.data.shape
-
-                    # Deconv the convoluted res
-                    deconv = L.Deconvolution2D(out_channels, in_channels, (kh, kw), 
-                                               stride=conv.stride, pad=conv.pad, initialW=conv.W.data, nobias=True)
-                    enc = deconv(enc)
-            except:
-                pass
-
-            activations_maps.append(enc.data)
-
-        return xp.concatenate(activations_maps)
-            
-
 
     def __call__(self, x, iter_num=-1.0):
         """
@@ -957,8 +893,6 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
     summaries, summaries_valid = [], []
     training_queue = []
     validation_queue = []
-    fill_length_training = batch_size - (len(images_training) % batch_size)
-    fill_length_validation = batch_size - (len(images_validation) % batch_size if len(images_validation) > batch_size else batch_size%len(images_validation))
     #for itr in xrange(epoch):
     while train_iter.epoch < epoch:
         itr = train_iter.epoch
@@ -1001,7 +935,9 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
                 
                 # Run through validation set
                 #loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
-                loss_valid = training_model([xp.array(img_validation_set), xp.array(xp.act_validation_set), xp.array(sta_validation_set)], itr)
+                with chainer.using_config('train', False):
+                    loss_valid = training_model([xp.array(img_validation_set), xp.array(xp.act_validation_set), xp.array(sta_validation_set)], itr)
+
                 psnr_all_valid = training_model.psnr_all
                 summaries_valid = training_model.summaries
 
