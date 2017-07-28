@@ -10,6 +10,12 @@ import math
 from math import floor, log
 import numpy as np
 
+try:
+    import cupy
+except:
+    cupy = np
+    pass
+
 import chainer
 from chainer import cuda
 from chainer import variable
@@ -724,7 +730,7 @@ class Model(chainer.Chain):
             summaries.append(self.prefix + '_recon_cost' + str(i) + ': ' + str(recon_cost.data))
             summaries.append(self.prefix + '_psnr' + str(i) + ': ' + str(psnr_i.data))
             loss += recon_cost
-            print(recon_cost.data)
+            #print(recon_cost.data)
 
         for i, state, gen_state in zip(range(len(gen_states)), states[self.num_frame_before_prediction:], gen_states[self.num_frame_before_prediction - 1:]):
             state = variable.Variable(state)
@@ -803,7 +809,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
     actions = []
     states = []
     for i in xrange(1, len(data_map)): # Exclude the header
-        logger.info("Loading data {0}/{1}".format(i, len(data_map)-1))
+        #logger.info("Loading data {0}/{1}".format(i, len(data_map)-1))
         images.append(np.float32(np.load(data_dir + '/' + data_map[i][2])))
         actions.append(np.float32(np.load(data_dir + '/' + data_map[i][3])))
         states.append(np.float32(np.load(data_dir + '/' + data_map[i][4])))
@@ -821,7 +827,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
     actions_validation = np.asarray(actions[train_val_split_index:])
     states_validation = np.asarray(states[train_val_split_index:])
 
-    print('Data set contain {0}, {1} will be use for training and {2} will be use for validation'.format(len(images)-1, train_val_split_index, len(images)-1-train_val_split_index))
+    logger.info('Data set contain {0}, {1} will be use for training and {2} will be use for validation'.format(len(images)-1, train_val_split_index, len(images)-1-train_val_split_index))
 
     # Create the model    
     training_model = Model(
@@ -852,7 +858,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
     if gpu > -1:
         chainer.cuda.get_device_from_id(gpu).use()
         training_model.to_gpu()
-        xp = chainer.cuda.cupy
+        xp = cupy
     else:
         xp = np
 
@@ -894,6 +900,8 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
     training_queue = []
     validation_queue = []
     #for itr in xrange(epoch):
+    start_time = None
+    stop_time = None
     while train_iter.epoch < epoch:
         itr = train_iter.epoch
         batch = train_iter.next()
@@ -903,6 +911,9 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         # Perform training
         logger.info("Begining training for mini-batch {0}/{1} of epoch {2}".format(str(train_iter.current_position), str(len(images_training)), str(itr+1)))
         #loss = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+        if start_time is None:
+            stat_time = time.time()
+
         optimizer.update(training_model, [xp.array(img_training_set), xp.array(act_training_set), xp.array(sta_training_set)], itr)
         loss = training_model.loss
         psnr_all = training_model.psnr_all
@@ -919,15 +930,24 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         loss, psnr_all, loss_data_cpu, psnr_data_cpu = None, None, None, None
 
         if train_iter.is_new_epoch:
+            stop_time = time.time()
+            logger.info("[TRAIN] Epoch #: {}".format(itr+1))
+            logger.info("[TRAIN] Epoch elapsed time: {}".format(stop_time-start_time))
+
             local_losses = np.array(local_losses)
             local_psnr_all = np.array(local_psnr_all)
             global_losses.append([local_losses.mean(), local_losses.std(), local_losses.min(), local_losses.max(), np.median(local_losses)])
             global_psnr_all.append([local_psnr_all.mean(), local_psnr_all.std(), local_psnr_all.min(), local_psnr_all.max(), np.median(local_psnr_all)])
 
+            logger.info("[TRAIN] epoch loss: {}".format(local_losses.mean()))
+            logger.info("[TRAIN] epoch psnr: {}".format(local_psnr_all.mean()))
+
             local_losses, local_psnr_all = [], []
+            start_time, stop_time = None, None
 
         if train_iter.is_new_epoch and itr+1 % validation_interval == 0:
 
+            start_time = time.time()
             for batch in valid_iter:
                 logger.info("Begining validation for mini-batch {0}/{1} of epoch {2}".format(str(valid_iter.current_position), str(len(images_validation)), str(itr+1)))
                 img_validation_set, act_validation_set, sta_validation_set = concat_examples(batch)
@@ -949,11 +969,17 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
                 training_model.reset_state()
 
                 loss_valid, psnr_all_valid, loss_valid_data_cpu, psnr_all_valid_data_cpu = None, None, None, None
+            stop_time = time.time()
+            logger.info("[VALID] Epoch #: {}".format(itr+1))
+            logger.info("[VALID] epoch elapsed time: {}".format(stop_time-start_time))
 
             local_losses_valid = np.array(local_losses_valid)
             local_psnr_all_valid = np.array(local_psnr_all_valid)
             global_losses_valid.append([local_losses_valid.mean(), local_losses_valid.std(), local_losses_valid.min(), local_losses_valid.max(), np.median(local_losses_valid)])
             global_psnr_all_valid.append([local_psnr_all_valid.mean(), local_psnr_all_valid.std(), local_psnr_all_valid.min(), local_psnr_all_valid.max(), np.median(local_psnr_all_valid)])
+
+            logger.info("[VALID] epoch loss: {}".format(local_losses_valid.mean()))
+            logger.info("[VALID] epoch psnr: {}".format(local_psnr_all_valid.mean()))
 
             local_losses_valid, local_psnr_all_valid = [], []
             
@@ -976,11 +1002,11 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
             np.save(save_dir + '/' + training_suffix + '-global_losses_valid', np.array(global_losses_valid))
             np.save(save_dir + '/' + training_suffix + '-global_psnr_all', np.array(global_psnr_all_valid))
 
-        for summ in summaries:
-            logger.info(summ)
+        #for summ in summaries:
+            #logger.info(summ)
         summaries = []
-        for summ_valid in summaries_valid:
-            logger.info(summ_valid)
+        #for summ_valid in summaries_valid:
+            #logger.info(summ_valid)
         summaries_valid = []
     
 
