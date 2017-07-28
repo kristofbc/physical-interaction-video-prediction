@@ -208,14 +208,13 @@ class LayerNormalizationConv2D(chainer.Chain):
 class BasicConvLSTMCell(chainer.Chain):
     """ Stateless convolutional LSTM, as seen in lstm_op.py from video_prediction model """
 
-    def __init__(self, in_size, out_size, filter_size=5):
+    def __init__(self, out_size=None, filter_size=5):
         super(BasicConvLSTMCell, self).__init__()
 
         with self.init_scope():
             # @TODO: maybe provide in channels because the concatenation
-            self.conv = L.Convolution2D(in_channels=in_size, out_channels=4*out_size, ksize=(filter_size, filter_size), pad=filter_size/2)
+            self.conv = L.Convolution2D(4*out_size, (filter_size, filter_size), pad=filter_size/2)
 
-        self.in_size = in_size,
         self.out_size = out_size
         self.filter_size = filter_size
         self.reset_state()
@@ -307,7 +306,7 @@ class StatelessCDNA(chainer.Chain):
         # CDNA specific
         enc7 = self.enc7(enc6)
         enc7 = F.relu(enc7)
-        transformed = list([F.sigmoid(enc7)])
+        transformed_list = list([F.sigmoid(enc7)])
 
         # CDNA specific
         # Predict kernels using linear function of last layer
@@ -332,14 +331,16 @@ class StatelessCDNA(chainer.Chain):
 
         # Transform the image.
         transformed = F.depthwise_convolution_2d(prev_image, cdna_kerns, stride=(1, 1), pad=DNA_KERN_SIZE/2)
-        
+
         # Transpose the dimensions where they belong.
         transformed = F.reshape(transformed, (color_channels, int(batch_size), self.num_masks, img_height, img_width))
         transformed = F.transpose(transformed, (2, 1, 0, 3, 4))
         transformed = F.split_axis(transformed, indices_or_sections=self.num_masks, axis=0)
         transformed = [F.squeeze(t, axis=0) for t in transformed]
 
-        return transformed, enc7
+        transformed_list += transformed
+
+        return transformed_list, enc7
 
 
 class StatelessDNA(chainer.Chain):
@@ -492,13 +493,13 @@ class Model(chainer.Chain):
             self.enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=3/2)
             self.enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64,64), pad=3/2)
 
-            self.lstm1 = BasicConvLSTMCell(in_size=64, out_size=32)
-            self.lstm2 = BasicConvLSTMCell(in_size=64, out_size=32)
-            self.lstm3 = BasicConvLSTMCell(in_size=96, out_size=64)
-            self.lstm4 = BasicConvLSTMCell(in_size=128, out_size=64)
-            self.lstm5 = BasicConvLSTMCell(in_size=192, out_size=128)
-            self.lstm6 = BasicConvLSTMCell(in_size=192, out_size=64)
-            self.lstm7 = BasicConvLSTMCell(in_size=128, out_size=32)
+            self.lstm1 = BasicConvLSTMCell(32)
+            self.lstm2 = BasicConvLSTMCell(32)
+            self.lstm3 = BasicConvLSTMCell(64)
+            self.lstm4 = BasicConvLSTMCell(64)
+            self.lstm5 = BasicConvLSTMCell(128)
+            self.lstm6 = BasicConvLSTMCell(64)
+            self.lstm7 = BasicConvLSTMCell(32)
             
             self.norm_enc0 = LayerNormalizationConv2D()
             self.norm_enc6 = LayerNormalizationConv2D()
