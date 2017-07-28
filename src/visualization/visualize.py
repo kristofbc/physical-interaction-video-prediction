@@ -138,7 +138,7 @@ class Visualizer(object):
             ax = plt.subplot(nrow, nrow, i+1)
             #ax.get_xaxis().set_visible(false)
             #ax.get_yaxis().set_visible(false)
-            plt.imshow(bitmap)
+            plt.imshow(bitmap, **kwargs)
         return plt
 
     def plot_output(self, layer_name, **kwargs):
@@ -400,7 +400,7 @@ def main(model, layer_idx, model_name, data_index, model_dir, output_dir, data_d
 
         # Load the model for prediction
         logger.info("Importing model {0}/{1} of type {2}".format(model_dir, model, model_type))
-        model = Model(
+        pred_model = Model(
             num_masks=num_masks,
             is_cdna=model_type == 'CDNA',
             is_dna=model_type == 'DNA',
@@ -411,7 +411,7 @@ def main(model, layer_idx, model_name, data_index, model_dir, output_dir, data_d
             prefix='predict'
         )
 
-        chainer.serializers.load_npz(model_path + '/' + model_name, model)
+        chainer.serializers.load_npz(model_path + '/' + model_name, pred_model)
         logger.info("Model imported successfully")
         
         logger.info("Predicting input for the activation map")
@@ -425,8 +425,8 @@ def main(model, layer_idx, model_name, data_index, model_dir, output_dir, data_d
         # Only one image to visualize the activation
         plt.cla()
 
-        model([resize_img_pred[0:3], act_pred[0:3], sta_pred[0:3]], 0)
-        visualizer = Visualizer(model)
+        pred_model([resize_img_pred[0:3], act_pred[0:3], sta_pred[0:3]], 0)
+        visualizer = Visualizer(pred_model)
 
         def deconv(conv):
             def ops(x):
@@ -438,11 +438,12 @@ def main(model, layer_idx, model_name, data_index, model_dir, output_dir, data_d
 
 
         #plt_instance = visualizer.plot_activation(model.conv_res[0], deconv(model.enc0))
-        plt_instance = visualizer.plot_activation(model.conv_res[0])
-        plt_instance.show()
-        exit()
-        plt_inst = visualize_layer_activation(model, [resize_img_pred[0:3], act_pred[0:3], sta_pred[0:3]], layer_idx)
-        plt_inst.show()
+        logger.info("Creating the layer activation bitmaps")
+        for i in xrange(len(pred_model.conv_res)):
+            plt.cla()
+            plt.figure(1)
+            plt_instance = visualizer.plot_activation(pred_model.conv_res[i], interpolation="nearest", cmap="gray")
+            plt.savefig(visualization_path + "/" + model + "-iteration-{0}-activation-{1}".format(iteration_number, i) + ".png")
 
 
 

@@ -485,13 +485,14 @@ class Model(chainer.Chain):
         super(Model, self).__init__()
 
         with self.init_scope():
-	    self.enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=5/2)
-            self.enc1 = L.Convolution2D(in_channels=32, out_channels=32, ksize=(3,3), stride=2, pad=3/2)
-            self.enc2 = L.Convolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, pad=3/2)
+	    self.enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=2)
+            self.enc1 = L.Convolution2D(in_channels=32, out_channels=32, ksize=(3,3), stride=2, pad=1)
+            self.enc2 = L.Convolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, pad=1)
             self.enc3 = L.Convolution2D(in_channels=74, out_channels=64, ksize=(1,1), stride=1)
-            self.enc4 = L.Deconvolution2D(in_channels=128, out_channels=128, ksize=(3,3), stride=2, outsize=(16,16), pad=3/2)
-            self.enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=3/2)
-            self.enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64,64), pad=3/2)
+
+            self.enc4 = L.Deconvolution2D(in_channels=128, out_channels=128, ksize=(3,3), stride=2, outsize=(16,16), pad=1)
+            self.enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=1)
+            self.enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64, 64), pad=1)
 
             self.lstm1 = BasicConvLSTMCell(32)
             self.lstm2 = BasicConvLSTMCell(32)
@@ -708,10 +709,19 @@ class Model(chainer.Chain):
             masks = F.reshape(masks, (int(batch_size), self.num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1? ok!
             mask_list = F.split_axis(masks, indices_or_sections=self.num_masks+1, axis=1) # Previously axis=3 but our channels are on axis=1 ?
             #output = F.scale(prev_image, mask_list[0], axis=0)
-            output = broadcast_scale(prev_image, mask_list[0], axis=0)
-            for layer, mask in zip(transformed, mask_list[1:]):
+
+            # Shape of masks should match prev_image
+            mask_list_concat = []
+            for i in xrange(len(mask_list)):
+                mask_list_concat.append(F.concat((mask_list[i], mask_list[i], mask_list[i]), axis=1))
+            
+            #output = broadcast_scale(prev_image, F.concatenate(mask_list[0], axis=0)
+            output = mask_list_concat[0] * prev_image
+            #for layer, mask in zip(transformed, mask_list[1:]):
+            for layer, mask in zip(transformed, mask_list_concat[1:]):
                 #output += F.scale(layer, mask, axis=0)
-                output += broadcast_scale(layer, mask, axis=0)
+                #output += broadcast_scale(layer, mask, axis=0)
+                output += layer * mask
             gen_images.append(output)
 
             current_state = self.current_state(state_action)
