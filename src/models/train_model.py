@@ -485,14 +485,14 @@ class Model(chainer.Chain):
         super(Model, self).__init__()
 
         with self.init_scope():
-	    self.enc0 = L.Convolution2D(in_channels=3, out_channels=32, ksize=(5, 5), stride=2, pad=2)
-            self.enc1 = L.Convolution2D(in_channels=32, out_channels=32, ksize=(3,3), stride=2, pad=1)
-            self.enc2 = L.Convolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, pad=1)
-            self.enc3 = L.Convolution2D(in_channels=74, out_channels=64, ksize=(1,1), stride=1)
+	    self.enc0 = L.Convolution2D(32, (5, 5), stride=2, pad=2)
+            self.enc1 = L.Convolution2D(32, (3, 3), stride=2, pad=1)
+            self.enc2 = L.Convolution2D(64, (3, 3), stride=2, pad=1)
+            self.enc3 = L.Convolution2D(64, (1, 1), stride=1)
 
-            self.enc4 = L.Deconvolution2D(in_channels=128, out_channels=128, ksize=(3,3), stride=2, outsize=(16,16), pad=1)
-            self.enc5 = L.Deconvolution2D(in_channels=96, out_channels=96, ksize=(3,3), stride=2, outsize=(32,32), pad=1)
-            self.enc6 = L.Deconvolution2D(in_channels=64, out_channels=64, ksize=(3,3), stride=2, outsize=(64, 64), pad=1)
+            self.enc4 = L.Deconvolution2D(128, (3, 3), stride=2, outsize=(16,16), pad=1)
+            self.enc5 = L.Deconvolution2D(96, (3, 3), stride=2, outsize=(32,32), pad=1)
+            self.enc6 = L.Deconvolution2D(64, (3, 3), stride=2, outsize=(64, 64), pad=1)
 
             self.lstm1 = BasicConvLSTMCell(32)
             self.lstm2 = BasicConvLSTMCell(32)
@@ -512,9 +512,9 @@ class Model(chainer.Chain):
             self.hidden6 = LayerNormalizationConv2D()
             self.hidden7 = LayerNormalizationConv2D()
 
-            self.masks = L.Deconvolution2D(in_channels=64, out_channels=num_masks+1, ksize=(1,1), stride=1)
+            self.masks = L.Deconvolution2D(num_masks+1, (1, 1), stride=1)
 
-            self.current_state = L.Linear(in_size=None, out_size=5)
+            self.current_state = L.Linear(5)
 
             model = None
             if is_cdna:
