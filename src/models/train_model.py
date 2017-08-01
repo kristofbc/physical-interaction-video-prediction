@@ -353,7 +353,7 @@ class StatelessDNA(chainer.Chain):
         super(StatelessDNA, self).__init__()
 
         with self.init_scope():
-            self.enc7 = L.Deconvolution2D(in_channels=64, out_channels=DNA_KERN_SIZE**2, ksize=(1,1), stride=1)
+            self.enc7 = L.Deconvolution2D(DNA_KERN_SIZE**2, (1, 1), stride=1)
 
         self.num_masks = num_masks
 
@@ -388,8 +388,8 @@ class StatelessDNA(chainer.Chain):
         kernel_inputs = []
         for xkern in range(DNA_KERN_SIZE):
             for ykern in range(DNA_KERN_SIZE):
-                #tmp = F.get_item(prev_image_pad, [prev_image_pad.shape[0], prev_image_pad.shape[0], xkern:img_height, ykern:img_width])
-                tmp = F.get_item(prev_image_pad, list([slice(0,prev_image_pad.shape[0]), slice(0,prev_image_pad.shape[1]), slice(xkern,img_height), slice(ykern,img_width)]))
+                #tmp = F.get_item(prev_image_pad, list([slice(0,prev_image_pad.shape[0]), slice(0,prev_image_pad.shape[1]), slice(xkern,img_height), slice(ykern,img_width)]))
+                tmp = prev_image_pad[:,:,xkern:img_height, ykern:img_width]
                 # ** Added this operation to make sure the size was still the original one!
                 tmp = F.pad(tmp, [[0,0], [0,0], [0, xkern], [0, ykern]], mode='constant', constant_values=0)
                 tmp = F.expand_dims(tmp, axis=1) # Previously axis=3 but our channel is on axis=1 ? ok!
@@ -401,7 +401,8 @@ class StatelessDNA(chainer.Chain):
         kernel_normalized_sum = F.sum(kernel_normalized, axis=1, keepdims=True) # Previously axis=3 but our channel are on axis 1 ? ok!
         kernel_normalized = broadcasted_division(kernel_normalized, kernel_normalized_sum)
         kernel_normalized = F.expand_dims(kernel_normalized, axis=2)
-        kernel_normalized = F.scale(kernel_inputs, kernel_normalized, axis=0)
+        #kernel_normalized = F.scale(kernel_inputs, kernel_normalized, axis=0)
+        kernel_normalized = broadcast_scale(kernel_inputs, kernel_normalized)
         kernel_normalized = F.sum(kernel_normalized, axis=1, keepdims=False)
         transformed = [kernel_normalized]
 
@@ -417,9 +418,9 @@ class StatelessSTP(chainer.Chain):
         super(StatelessSTP, self).__init__()
 
         with self.init_scope():
-            self.enc7 = L.Deconvolution2D(in_channels=64, out_channels=3, ksize=(1,1), stride=1)
-            self.stp_input = L.Linear(in_size=None, out_size=100)
-            self.identity_params = L.Linear(in_size=None, out_size=6)
+            self.enc7 = L.Deconvolution2D(3, (1, 1), stride=1)
+            self.stp_input = L.Linear(100)
+            self.identity_params = L.Linear(6)
 
 
     def __call__(self, encs, hiddens, batch_size, prev_image, num_masks, color_channels):
@@ -460,7 +461,9 @@ class StatelessSTP(chainer.Chain):
             trans = F.spatial_transformer_sampler(prev_image, grid)
             stp_transformations.append(trans)
 
-        return stp_transformations, enc7
+        transformed += stp_transformations
+
+        return transformed, enc7
 
 
 class Model(chainer.Chain):
@@ -708,20 +711,10 @@ class Model(chainer.Chain):
             masks = F.softmax(masks)
             masks = F.reshape(masks, (int(batch_size), self.num_masks+1, int(img_height), int(img_width))) # Previously num_mask at the end, but our channels are on axis=1? ok!
             mask_list = F.split_axis(masks, indices_or_sections=self.num_masks+1, axis=1) # Previously axis=3 but our channels are on axis=1 ?
-            #output = F.scale(prev_image, mask_list[0], axis=0)
 
-            # Shape of masks should match prev_image
-            mask_list_concat = []
-            for i in xrange(len(mask_list)):
-                mask_list_concat.append(F.concat((mask_list[i], mask_list[i], mask_list[i]), axis=1))
-            
-            #output = broadcast_scale(prev_image, F.concatenate(mask_list[0], axis=0)
-            output = mask_list_concat[0] * prev_image
-            #for layer, mask in zip(transformed, mask_list[1:]):
-            for layer, mask in zip(transformed, mask_list_concat[1:]):
-                #output += F.scale(layer, mask, axis=0)
-                #output += broadcast_scale(layer, mask, axis=0)
-                output += layer * mask
+            output = broadcast_scale(prev_image, mask_list[0])
+            for layer, mask in zip(transformed, mask_list[1:]):
+                output += broadcast_scale(layer, mask, axis=0)
             gen_images.append(output)
 
             current_state = self.current_state(state_action)
@@ -770,7 +763,7 @@ class Model(chainer.Chain):
 @click.option('--data_dir', type=click.Path(exists=True), default='data/processed/brain-robotics-data/push/push_train', help='Directory containing data.')
 @click.option('--output_dir', type=click.Path(), default='models', help='Directory for model checkpoints.')
 @click.option('--event_log_dir', type=click.Path(), default='models', help='Directory for writing summary.')
-@click.option('--epoch', type=click.INT, default=3125, help='Number of training epochs: 100 000/batch_size.')
+@click.option('--num_iterations', type=click.INT, default=100000, help='Number of training iterations. Number of epoch is: num_iterations/batch_size.')
 @click.option('--pretrained_model', type=click.Path(), default='', help='Filepath of a pretrained model to initialize from.')
 @click.option('--pretrained_state', type=click.Path(), default='', help='Filepath of a pretrained state to initialize from.')
 @click.option('--sequence_length', type=click.INT, default=10, help='Sequence length, including context frames.')
@@ -786,7 +779,7 @@ class Model(chainer.Chain):
 @click.option('--validation_interval', type=click.INT, default=200, help='How often to run a batch through the validation model')
 @click.option('--save_interval', type=click.INT, default=50, help='How often to save a model checkpoint')
 @click.option('--debug', type=click.INT, default=0, help='Debug mode.')
-def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretrained_state, sequence_length, context_frames, use_state, model_type, num_masks, schedsamp_k, train_val_split, batch_size, learning_rate, gpu, validation_interval, save_interval, debug):
+def main(data_dir, output_dir, event_log_dir, num_iterations, pretrained_model, pretrained_state, sequence_length, context_frames, use_state, model_type, num_masks, schedsamp_k, train_val_split, batch_size, learning_rate, gpu, validation_interval, save_interval, debug):
     if debug == 1:
         chainer.set_debug(True)
 
@@ -797,7 +790,8 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
     logger.info('Model: {}'.format(model_type))
     logger.info('GPU: {}'.format(gpu))
     logger.info('# Minibatch-size: {}'.format(batch_size))
-    logger.info('# epoch: {}'.format(epoch))
+    logger.info('# Num iterations: {}'.format(num_iterations))
+    logger.info('# epoch: {}'.format(round(num_iterations/batch_size)))
 
     model_suffix_dir = "{0}-{1}-{2}".format(time.strftime("%Y%m%d-%H%M%S"), model_type, batch_size)
     training_suffix = "{0}".format('training')
@@ -910,18 +904,20 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
     summaries, summaries_valid = [], []
     training_queue = []
     validation_queue = []
-    #for itr in xrange(epoch):
+    #for epoch in xrange(epochs):
     start_time = None
     stop_time = None
-    while train_iter.epoch < epoch:
-        itr = train_iter.epoch
+    itr = 0
+    while itr < num_iterations:
+        epoch = train_iter.epoch
         batch = train_iter.next()
         #x = concat_examples(batch)
         img_training_set, act_training_set, sta_training_set = concat_examples(batch)
 
         # Perform training
-        logger.info("Begining training for mini-batch {0}/{1} of epoch {2}".format(str(train_iter.current_position), str(len(images_training)), str(itr+1)))
-        #loss = training_model(img_training_set, act_training_set, sta_training_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+        logger.info("Begining training for mini-batch {0}/{1} of epoch {2}".format(str(train_iter.current_position), str(len(images_training)), str(epoch+1)))
+        logger.info("Global iteration: {}".format(str(itr+1)))
+        #loss = training_model(img_training_set, act_training_set, sta_training_set, epoch, schedsamp_k, use_state, num_masks, context_frames)
         if start_time is None:
             start_time = time.time()
 
@@ -937,12 +933,12 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         local_psnr_all.append(psnr_data_cpu)
         training_model.reset_state()
 
-        logger.info("{0} {1}".format(str(itr+1), str(loss.data)))
+        logger.info("{0} {1}".format(str(epoch+1), str(loss.data)))
         loss, psnr_all, loss_data_cpu, psnr_data_cpu = None, None, None, None
 
         if train_iter.is_new_epoch:
             stop_time = time.time()
-            logger.info("[TRAIN] Epoch #: {}".format(itr+1))
+            logger.info("[TRAIN] Epoch #: {}".format(epoch+1))
             logger.info("[TRAIN] Epoch elapsed time: {}".format(stop_time-start_time))
 
             local_losses = np.array(local_losses)
@@ -956,16 +952,16 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
             local_losses, local_psnr_all = [], []
             start_time, stop_time = None, None
 
-        if train_iter.is_new_epoch and itr+1 % validation_interval == 0:
+        if train_iter.is_new_epoch and epoch+1 % validation_interval == 0:
 
             start_time = time.time()
             for batch in valid_iter:
-                logger.info("Begining validation for mini-batch {0}/{1} of epoch {2}".format(str(valid_iter.current_position), str(len(images_validation)), str(itr+1)))
+                logger.info("Begining validation for mini-batch {0}/{1} of epoch {2}".format(str(valid_iter.current_position), str(len(images_validation)), str(epoch+1)))
                 img_validation_set, act_validation_set, sta_validation_set = concat_examples(batch)
                 #x_validation = concat_examples(batch)
                 
                 # Run through validation set
-                #loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, itr, schedsamp_k, use_state, num_masks, context_frames)
+                #loss_valid, psnr_all_valid, summaries_valid = validation_model(img_validation_set, act_validation_set, sta_validation_set, epoch, schedsamp_k, use_state, num_masks, context_frames)
                 with chainer.using_config('train', False):
                     loss_valid = training_model([xp.array(img_validation_set), xp.array(xp.act_validation_set), xp.array(sta_validation_set)], itr)
 
@@ -981,7 +977,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
 
                 loss_valid, psnr_all_valid, loss_valid_data_cpu, psnr_all_valid_data_cpu = None, None, None, None
             stop_time = time.time()
-            logger.info("[VALID] Epoch #: {}".format(itr+1))
+            logger.info("[VALID] Epoch #: {}".format(epoch+1))
             logger.info("[VALID] epoch elapsed time: {}".format(stop_time-start_time))
 
             local_losses_valid = np.array(local_losses_valid)
@@ -998,17 +994,17 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
             valid_iter.reset()
             training_model.reset_state()
 
-        if train_iter.is_new_epoch and itr % save_interval == 0:
-        #if itr % save_interval == 0:
+        if train_iter.is_new_epoch and epoch % save_interval == 0:
+        #if epoch % save_interval == 0:
             logger.info('Saving model')
 
             save_dir = output_dir + '/' + model_suffix_dir
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
 
-            serializers.save_npz(save_dir + '/' + training_suffix + '-' + str(itr), training_model)
-            #serializers.save_npz(save_dir + '/' + validation_suffix + '-' + str(itr), validation_model)
-            serializers.save_npz(save_dir + '/' + state_suffix + '-' + str(itr), optimizer)
+            serializers.save_npz(save_dir + '/' + training_suffix + '-' + str(epoch), training_model)
+            #serializers.save_npz(save_dir + '/' + validation_suffix + '-' + str(epoch), validation_model)
+            serializers.save_npz(save_dir + '/' + state_suffix + '-' + str(epoch), optimizer)
             np.save(save_dir + '/' + training_suffix + '-global_losses', np.array(global_losses))
             np.save(save_dir + '/' + training_suffix + '-global_psnr_all', np.array(global_psnr_all))
             np.save(save_dir + '/' + training_suffix + '-global_losses_valid', np.array(global_losses_valid))
@@ -1020,6 +1016,7 @@ def main(data_dir, output_dir, event_log_dir, epoch, pretrained_model, pretraine
         #for summ_valid in summaries_valid:
             #logger.info(summ_valid)
         summaries_valid = []
+        itr += 1
     
 
 if __name__ == '__main__':

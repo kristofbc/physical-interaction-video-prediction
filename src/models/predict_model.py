@@ -128,10 +128,12 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
     # Resize the predicted image
     resize_predicted_images = []
     for i in xrange(len(predicted_images)):
-        resize = predicted_images[i] * 255.0
-        resize = F.resize_images(resize, (original_image_height, original_image_width)) 
-        resize = F.cast(resize, np.int8)
-        resize_predicted_images.append(resize)
+        resize = predicted_images[i].data[0]
+        resize -= resize.min()
+        resize /= resize.max()
+        resize *= 255.0
+        resize_predicted_images.append(resize.astype(np.uint8))
+
 
     # Print the images horizontally
     # First row is the time_step
@@ -195,9 +197,13 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
     # Prediction
     predicted_gif = []
     for i in xrange(len(resize_predicted_images)):
-        img = resize_predicted_images[i].data[0]
+        #img = resize_predicted_images[i].data[0]
+        img = resize_predicted_images[i]
         img = np.rollaxis(img, 0, 3)
         img = Image.fromarray(img, 'RGB')
+
+        # Resize the image to the original dimensions
+        img = img.resize((original_image_width, original_image_height), Image.ANTIALIAS)
 
         if downscale_factor != 1:
             img = img.resize((frame_width, frame_height), Image.ANTIALIAS)
