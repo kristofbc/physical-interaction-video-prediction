@@ -441,6 +441,7 @@ class StatelessSTP(chainer.Chain):
         enc0, enc1, enc2, enc3, enc4, enc5, enc6 = encs
         hidden1, hidden2, hidden3, hidden4, hidden5, hidden6, hidden7 = hiddens
 
+        xp = chainer.cuda.get_array_module(enc6.data)
         # STP specific
         enc7 = self.enc7(enc6)
         transformed = list([F.sigmoid(enc7)])
@@ -450,7 +451,7 @@ class StatelessSTP(chainer.Chain):
         stp_input1 = F.relu(stp_input1)
         identity_params = np.array([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
         identity_params = np.repeat(identity_params, int(batch_size), axis=0)
-        identity_params = variable.Variable(identity_params)
+        identity_params = variable.Variable(xp.array(identity_params))
 
         stp_transformations = []
         for i in range(num_masks-1):
