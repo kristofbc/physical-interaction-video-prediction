@@ -86,6 +86,7 @@ def scheduled_sample(ground_truth_x, generated_x, batch_size, num_ground_truth):
     generated_x = chainer.cuda.to_cpu(generated_x.data)
 
     idx = np.arange(int(batch_size))
+    np.random.shuffle(idx)
     ground_truth_idx = np.array(np.take(idx, np.arange(num_ground_truth)))
     generated_idx = np.array(np.take(idx, np.arange(num_ground_truth, int(batch_size))))
 
@@ -176,7 +177,9 @@ def broadcast_scale(x, y, axis=0):
 # =============
 # Chains (chns)
 # =============
-class LayerNormalizationConv2D(chainer.Chain):
+
+class LayerNormalizationConv2D(chainer.Chain):    
+    
     def __init__(self):
         super(LayerNormalizationConv2D, self).__init__()
 
