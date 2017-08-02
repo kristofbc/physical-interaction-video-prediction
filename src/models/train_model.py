@@ -72,6 +72,10 @@ def concat_examples(batch):
 def scheduled_sample(ground_truth_x, generated_x, batch_size, num_ground_truth):
     """
         Sample batch with specified mix of ground truth and generated data points.
+        e.g: the final matrix is a mix of vectors from the ground_truth (gt) and prediction (p)
+            [gt1, gt2, gt3, gt4, gt5, gt6, gt7, gt8, gt9, gt10] = ground truth
+            [p1, p2, p3, p4, p5, p6] = prediction
+            [p1, gt2, gt3, gt4, p5, p6, gt7, gt8, gt9, gt10] = returns
 
         Args:
             ground_truth_x: tensor of ground-truth data point
