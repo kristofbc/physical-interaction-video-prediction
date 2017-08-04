@@ -16,6 +16,7 @@ import os
 import csv
 import logging
 import glob
+import subprocess
 
 import six.moves.cPickle as pickle
 
@@ -244,7 +245,6 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
         new_image.save(path + '/prediction-' + str(time_step) + '-' +  model_name + '.png')
 
     print(model)
-
 
 if __name__ == '__main__':
     log_fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'

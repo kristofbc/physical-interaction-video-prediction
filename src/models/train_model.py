@@ -9,6 +9,7 @@ import random
 import math
 from math import floor, log
 import numpy as np
+import subprocess
 
 try:
     import cupy
@@ -867,6 +868,17 @@ def main(data_dir, output_dir, event_log_dir, num_iterations, pretrained_model, 
         chainer.serializers.load_npz(pretrained_state, training_model)
         logger.info("Loading pretrained state {}".format(pretrained_state))
 
+    # Save the current GIT commit corresponding to the current training.
+    # When predicting or visualizing the model, change the working directory to the GIT snapshot
+    # This way, instead of copying the files into the model folder, we use GIT functionality to preserve the training files
+    current_version = None
+    try:
+        subprocess.check_call(['git', 'status'])
+        process = subprocess.Popen(['git', 'rev-parse', 'HEAD'], stdout=subprocess.PIPE)
+        current_version = process.communicate()[0]
+    except:
+        pass
+
     # Training
     # Enable GPU support if defined
     if gpu > -1:
@@ -1010,6 +1022,10 @@ def main(data_dir, output_dir, event_log_dir, num_iterations, pretrained_model, 
             save_dir = output_dir + '/' + model_suffix_dir
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
+                # Save the version of the code
+                f = open(save_dir + '/version', 'w')
+                f.write(current_version + '\n')
+                f.close()
 
             serializers.save_npz(save_dir + '/' + training_suffix + '-' + str(epoch), training_model)
             #serializers.save_npz(save_dir + '/' + validation_suffix + '-' + str(epoch), validation_model)
