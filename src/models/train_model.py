@@ -644,7 +644,8 @@ class Model(chainer.Chain):
         gen_states, gen_images = [], []
         current_state = states[0]
 
-        if self.scheduled_sampling_k == -1:
+        # When validation/test, disable schedule sampling
+        if not chainer.config.train or self.scheduled_sampling_k == -1:
             feedself = True
         else:
             # Scheduled sampling, inverse sigmoid decay
