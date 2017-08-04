@@ -874,8 +874,13 @@ def main(data_dir, output_dir, event_log_dir, num_iterations, pretrained_model, 
     current_version = None
     try:
         subprocess.check_call(['git', 'status'])
-        process = subprocess.Popen(['git', 'rev-parse', 'HEAD'], stdout=subprocess.PIPE)
-        current_version = process.communicate()[0]
+        def git_exec(args):
+            process = subprocess.Popen(['git'] + args, stdout=subprocess.PIPE)
+            res = process.communicate()[0].rstrip().strip()
+            #process.wait()
+            return res
+
+        current_version = git_exec(['rev-parse', '--abbrev-ref', 'HEAD']) + '\n' + git_exec(['rev-parse', 'HEAD'])
     except:
         pass
 
