@@ -343,7 +343,7 @@ def visualize_layer_activation(model, x, layer_idx):
 @click.option('--data_dir', type=click.Path(exists=True), default='data/processed/brain-robotics-data/push/push_testnovel', help='Directory containing data.')
 @click.option('--time_step', type=click.INT, default=8, help='Number of time steps to predict.')
 @click.option('--model_type', type=click.STRING, default='', help='Type of the trained model.')
-@click.option('--schedsamp_k', type=click.FLOAT, default=900.0, help='The k parameter for schedules sampling. -1 for no scheduled sampling.')
+@click.option('--schedsamp_k', type=click.FLOAT, default=-1, help='The k parameter for schedules sampling. -1 for no scheduled sampling.')
 @click.option('--context_frames', type=click.INT, default=2, help='Number of frames before predictions.')
 @click.option('--use_state', type=click.INT, default=1, help='Whether or not to give the state+action to the model.')
 @click.option('--num_masks', type=click.INT, default=10, help='Number of masks, usually 1 for DNA, 10 for CDNA, STP.')
@@ -425,8 +425,9 @@ def main(model, layer_idx, model_name, data_index, model_dir, output_dir, data_d
         # Only one image to visualize the activation
         plt.cla()
 
-        pred_model([resize_img_pred[0:3], act_pred[0:3], sta_pred[0:3]], 0)
-        visualizer = Visualizer(pred_model)
+        with chainer.using_config('train', False):
+            pred_model([resize_img_pred[0:3], act_pred[0:3], sta_pred[0:3]], 0)
+            visualizer = Visualizer(pred_model)
 
         def deconv(conv):
             def ops(x):

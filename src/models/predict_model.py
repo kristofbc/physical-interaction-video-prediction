@@ -62,7 +62,7 @@ def get_data_info(data_dir, data_index):
 @click.option('--data_dir', type=click.Path(exists=True), default='data/processed/brain-robotics-data/push/push_testnovel', help='Directory containing data.')
 @click.option('--time_step', type=click.INT, default=8, help='Number of time steps to predict.')
 @click.option('--model_type', type=click.STRING, default='', help='Type of the trained model.')
-@click.option('--schedsamp_k', type=click.FLOAT, default=900.0, help='The k parameter for schedules sampling. -1 for no scheduled sampling.')
+@click.option('--schedsamp_k', type=click.FLOAT, default=-1, help='The k parameter for schedules sampling. -1 for no scheduled sampling.')
 @click.option('--context_frames', type=click.INT, default=2, help='Number of frames before predictions.')
 @click.option('--use_state', type=click.INT, default=1, help='Whether or not to give the state+action to the model.')
 @click.option('--num_masks', type=click.INT, default=10, help='Number of masks, usually 1 for DNA, 10 for CDNA, STP.')
@@ -123,8 +123,9 @@ def main(model_dir, model_name, data_index, models_dir, data_dir, time_step, mod
     resize_img_pred = np.asarray(resize_img_pred, dtype=np.float32)
 
     # Predict the new images
-    loss = model([resize_img_pred, act_pred, sta_pred], 0)
-    predicted_images = model.gen_images
+    with chainer.using_config('train', False):
+        loss = model([resize_img_pred, act_pred, sta_pred], 0)
+        predicted_images = model.gen_images
 
     # Resize the predicted image
     resize_predicted_images = []
